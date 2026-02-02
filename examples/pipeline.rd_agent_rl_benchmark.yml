@@ -1,0 +1,58 @@
+version: 1
+
+# Example pipeline for RD-agent style automation:
+# - deploy a benchmark environment
+# - run post-training RL benchmark
+# - validate a JSON metrics file
+#
+# Runner executes commands in order: auth -> tests -> deploy.setup -> deploy.health -> benchmark -> metrics validation.
+
+security:
+  mode: safe
+  # allowlist: []   # optional: if set, ONLY matching regex commands are allowed
+  # denylist: []    # optional: always blocked (in addition to safe defaults)
+  max_cmd_seconds: 1800
+  max_total_seconds: 7200
+
+tests:
+  # Keep this fast; treat it as a guardrail before deploy/benchmark.
+  cmds:
+    - pytest -q
+  timeout_seconds: 1200
+
+auth:
+  # Optional: login steps if your deploy/benchmark pulls private images/models.
+  # Use `--unattended guided` if any step is interactive.
+  interactive: false
+  # steps:
+  #   - docker login --username ... --password-stdin
+
+deploy:
+  # Replace these with your RD-agent benchmark deploy steps.
+  # setup_cmds:
+  #   - kubectl apply -f deploy/k8s/
+  # health_cmds:
+  #   - kubectl rollout status deploy/rd-agent --timeout=180s
+  teardown_policy: on_failure
+  # teardown_cmds:
+  #   - kubectl delete -f deploy/k8s/ --ignore-not-found
+
+  kubectl_dump:
+    enabled: true
+    # namespace: default
+    # label_selector: app=rd-agent
+    include_logs: true
+
+benchmark:
+  # Replace with your benchmark entrypoint. It MUST write `metrics_path`.
+  # run_cmds:
+  #   - python -m rd_agent.bench.run --out .aider_fsm/metrics.json
+  metrics_path: .aider_fsm/metrics.json
+  required_keys:
+    - score
+    # - success_rate
+    # - avg_reward
+
+artifacts:
+  out_dir: .aider_fsm/artifacts
+

@@ -1,0 +1,34 @@
+version: 1
+
+# Place this file at: <target-repo>/.aider_fsm/actions.yml
+# The runner will:
+# - parse it
+# - execute actions in order (subject to pipeline security settings + unattended mode)
+# - write artifacts under `.aider_fsm/artifacts/<run_id>/...`
+# - delete `.aider_fsm/actions.yml` (best effort)
+
+actions:
+  - id: write-env
+    kind: write_file
+    path: .env
+    content: |
+      # Example environment for benchmark runs
+      RD_AGENT_MODE=benchmark
+      RD_AGENT_LOG_LEVEL=info
+
+  - id: install-deps
+    kind: run_cmd
+    cmd: python3 -m pip install -r requirements.txt
+    timeout_seconds: 900
+    retries: 1
+    risk_level: low
+    rationale: install python deps needed for tests/bench
+
+  - id: warmup
+    kind: run_cmd
+    cmd: pytest -q
+    timeout_seconds: 1200
+    retries: 0
+    risk_level: low
+    rationale: fail fast before deploy/benchmark
+

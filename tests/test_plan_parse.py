@@ -1,4 +1,4 @@
-from fsm_runner import parse_backlog_open_count, parse_next_step, parse_plan
+from runner.plan_format import parse_backlog_open_count, parse_next_step, parse_plan
 
 
 def _plan(text: str) -> str:
@@ -71,4 +71,3 @@ def test_duplicate_step_id_is_error():
     )
     parsed = parse_plan(plan)
     assert "duplicate_step_id" in parsed["errors"]
-

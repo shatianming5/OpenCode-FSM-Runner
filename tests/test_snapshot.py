@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from fsm_runner import build_snapshot, get_git_changed_files
+from runner.snapshot import build_snapshot, get_git_changed_files
 
 
 def test_build_snapshot_non_git(tmp_path: Path):
@@ -15,4 +15,3 @@ def test_build_snapshot_non_git(tmp_path: Path):
 
 def test_get_git_changed_files_non_git(tmp_path: Path):
     assert get_git_changed_files(tmp_path) is None
-

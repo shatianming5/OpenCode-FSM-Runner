@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from fsm_runner import PipelineSpec, load_pipeline_spec, run_pipeline_verification
+from runner.pipeline_spec import PipelineSpec, load_pipeline_spec
+from runner.pipeline_verify import run_pipeline_verification
 
 
 def _py_cmd(exit_code: int) -> str:

@@ -1,14 +1,19 @@
 # Aider-FSM Runner
 
-一个最小可用的“闭环”执行器：用 Aider Python API 在同一进程里驱动一个有限状态机（FSM），循环执行：
+A small, auditable **closed-loop executor** built on the Aider Python API.
+It is designed to integrate with agent projects (e.g. **RD-agent**) for automation such as **post-training RL benchmark deployment + evaluation**.
 
-1) 读 `PLAN.md` + 读仓库状态  
-2) 更新计划（只允许改 `PLAN.md`）  
-3) 执行 `Next` 的唯一一步（不允许改 `PLAN.md`）  
-4) 验收：先 `/test`，再本地 subprocess 再跑一次 `TEST_CMD`  
-5) 通过则标记 Done；失败则修复或改计划  
+Cycle:
 
-## 安装
+1) snapshot repo + `PLAN.md`  
+2) update plan (model may ONLY edit `PLAN.md`)  
+3) execute exactly one `Next` step (model may NOT edit `PLAN.md` or `pipeline.yml`)  
+4) verify via `pipeline.yml` (tests → deploy → benchmark → metrics)  
+5) pass → mark Done; fail → fix or re-plan; optionally request `.aider_fsm/actions.yml`  
+
+中文：这是一个“计划-执行-验收”的闭环 runner，重点是可审计、可复现、可安全执行（适合作为 RD-agent 的 benchmark/deploy 验收框架）。
+
+## Install
 
 ```bash
 python3.12 -m venv .venv
@@ -16,62 +21,72 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-注：`aider-chat` 在较新的 Python 版本上可能没有发布兼容包；如果你本机默认 `python3` 过新，请优先用 `python3.12` 创建虚拟环境。
+Note: `aider-chat` may lag behind the newest Python versions. Prefer Python 3.12 for the venv.
 
-## 环境变量
+## Environment variables
 
-- `OPENAI_API_KEY`：必需
-- `OPENAI_API_BASE`：可选（OpenAI 兼容服务时使用，例如自建/第三方 endpoint）
+- `OPENAI_API_KEY` (required)
+- `OPENAI_API_BASE` (optional; for OpenAI-compatible endpoints)
 
-## 运行
+## Run
 
-在目标仓库根目录运行（建议是 git 仓库，便于 guard 回滚）：
+Run from the **target repo root** (Git repo recommended for revert guards):
 
 ```bash
-python fsm_runner.py --repo . --goal "你的目标" --test-cmd "pytest -q"
+python3 fsm_runner.py --repo . --goal "你的目标" --test-cmd "pytest -q"
 ```
 
-### 部署 + Benchmark（pipeline.yml）
-
-如果你希望把“测试→部署→跑 benchmark→检查 metrics”也纳入验收闭环，在目标 repo 里放一个 `pipeline.yml`，然后：
+Or:
 
 ```bash
-python fsm_runner.py --repo . --pipeline pipeline.yml --ensure-kind
+python3 -m runner --repo . --goal "你的目标" --test-cmd "pytest -q"
 ```
 
-说明：
+### Run a remote repo (auto-clone)
 
-- `pipeline.yml` 是**人类提供的部署/评测契约**；runner 会在执行/计划更新阶段自动回滚对它的修改
-- 产物默认落在 `.aider_fsm/artifacts/<run_id>/`（可用 `--artifacts-dir` 覆盖）
-- 如果 `pipeline.yml` 里配置了 `auth` 且需要交互登录，用 `--unattended guided`（默认 strict 会拒绝可疑交互命令以避免 hang）
-
-可选参数：
-
-- `--seed path/to/file`：可重复，用于把入口文件加入 Aider 上下文
-- `--model gpt-4o-mini`
-- `--max-iters 200`
-- `--max-fix 10`
-- `--plan-path PLAN.md`
-- `--pipeline pipeline.yml`：启用部署/benchmark 流水线验收
-- `--artifacts-dir <path>`：产物目录（默认：pipeline.artifacts.out_dir 或 `.aider_fsm/artifacts`）
-- `--ensure-tools`：macOS 上自动安装/校验 `colima/docker/kubectl/helm/kind`
-- `--ensure-kind`：确保本地 kind 集群存在（通用）
-- `--kind-name <name>`：kind 集群名（默认：pipeline.tooling.kind_cluster_name 或 `kind`）
-- `--kind-config <path>`：kind 配置文件（可选）
-- `--unattended strict|guided`：无人值守模式（strict 默认更安全；guided 允许 auth 交互）
-- `--full-quickstart`：针对 AIOpsLab 的本地 kind Quick Start 做一次性 preflight（建集群/生成 config.yml/建 venv）
-- `--preflight-only`：只跑一次验收命令后退出（不进入 Aider FSM loop）
-
-## 让 Aider 自己跑（最大程度自动化）
-
-用 Aider 的 `/run` 来执行“装环境 + AIOpsLab QuickStart preflight”，推荐用这个 runbook 包一层（会解析并返回真实退出码）：
+You can point `--repo` at a git URL; the runner will clone it to `/tmp/aider_fsm_targets/` by default:
 
 ```bash
-python3 tools/aider_runbook.py
+python3 -m runner --repo https://github.com/evalplus/evalplus --goal "运行 evalplus smoke benchmark" --test-cmd "python -V"
 ```
 
-## 测试
+Use `--clone-dir` to choose a different clone location. The runner will also load `.env` by default (disable with `--env-file ''`).
+
+### Deploy + benchmark (pipeline.yml)
+
+Add a `pipeline.yml` to the target repo to include deploy/benchmark/metrics in the verification loop:
 
 ```bash
-python -m pytest -q
+python3 fsm_runner.py --repo . --pipeline pipeline.yml
+```
+
+Notes:
+
+- `pipeline.yml` is a **human-owned contract**. The runner will revert any model edits to it.
+- Artifacts are written under `.aider_fsm/artifacts/<run_id>/` (override via `--artifacts-dir`).
+- If you need interactive auth, set `pipeline.auth.interactive: true` and run with `--unattended guided`.
+
+Examples:
+
+- `examples/pipeline.example.yml`
+- `examples/pipeline.rd_agent_rl_benchmark.yml`
+
+### Environment/tooling bootstrap (actions.yml)
+
+If verification fails due to missing tools/config/auth, the model may write `.aider_fsm/actions.yml`.
+The runner executes it (subject to security policy) and records artifacts, then deletes the file.
+
+See `examples/actions.example.yml`.
+
+## Docs
+
+- `docs/overview.md`
+- `docs/pipeline_spec.md`
+- `docs/security_model.md`
+- `docs/integration_rd_agent.md`
+
+## Tests
+
+```bash
+pytest -q
 ```

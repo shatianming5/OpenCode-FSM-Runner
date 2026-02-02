@@ -24,14 +24,9 @@ auth:
   # timeout_seconds: 600
   # retries: 0
 
-tooling:
-  # Optional: let runner bootstrap macOS toolchain (brew + colima).
-  ensure_tools: false
-
-  # Optional: let runner ensure a kind cluster exists.
-  ensure_kind_cluster: true
-  kind_cluster_name: kind
-  # kind_config: kind/kind-config.yaml
+# Tooling bootstrap is intentionally NOT built-in.
+# If you need environment setup (install tools, write configs, start services),
+# put declarative steps into `.aider_fsm/actions.yml` and the runner will execute it.
 
 deploy:
   # setup_cmds: [kubectl apply -f k8s/]
