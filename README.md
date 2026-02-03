@@ -1,6 +1,6 @@
-# Aider-FSM Runner
+# OpenCode-FSM Runner
 
-A small, auditable **closed-loop executor** built on the Aider Python API.
+A small, auditable **closed-loop executor** driven by an OpenCode agent (via the OpenCode server API).
 It is designed to integrate with agent projects (e.g. **RD-agent**) for automation such as **post-training RL benchmark deployment + evaluation**.
 
 Cycle:
@@ -15,31 +15,53 @@ Cycle:
 
 ## Install
 
+Install OpenCode (CLI) first:
+
+```bash
+curl -fsSL https://opencode.ai/install | bash
+```
+
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Note: `aider-chat` may lag behind the newest Python versions. Prefer Python 3.12 for the venv.
-
 ## Environment variables
 
-- `OPENAI_API_KEY` (required)
-- `OPENAI_API_BASE` (optional; for OpenAI-compatible endpoints)
+- Provider credentials depend on your model choice, e.g.:
+  - `OPENAI_API_KEY` (for `openai/...`)
+  - `OPENAI_API_BASE` (optional; for OpenAI-compatible endpoints)
+- Model selection:
+  - Recommended: use `--model provider/model` (see `opencode models`)
+  - Convenience: set `OPENAI_MODEL=<model_id>` (or `LITELLM_CHAT_MODEL`) and omit `--model`
 
 ## Run
 
 Run from the **target repo root** (Git repo recommended for revert guards):
 
 ```bash
-python3 fsm_runner.py --repo . --goal "你的目标" --test-cmd "pytest -q"
+python3 fsm_runner.py --repo . --goal "你的目标" --test-cmd "pytest -q" --model myproxy/deepseek-v3.2
 ```
 
 Or:
 
 ```bash
-python3 -m runner --repo . --goal "你的目标" --test-cmd "pytest -q"
+python3 -m runner --repo . --goal "你的目标" --test-cmd "pytest -q" --model myproxy/deepseek-v3.2
+```
+
+### Use an existing OpenCode server
+
+Start a server in your target repo root:
+
+```bash
+OPENCODE_SERVER_PASSWORD=... opencode serve --hostname 127.0.0.1 --port 4096
+```
+
+Then run the runner with:
+
+```bash
+OPENCODE_SERVER_PASSWORD=... python3 -m runner --repo . --opencode-url http://127.0.0.1:4096
 ```
 
 ### Run a remote repo (auto-clone)

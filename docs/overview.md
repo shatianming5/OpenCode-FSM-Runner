@@ -1,4 +1,4 @@
-# Aider-FSM Runner (Overview)
+# OpenCode-FSM Runner (Overview)
 
 This repo provides a small, auditable **closed-loop executor**:
 
@@ -23,4 +23,3 @@ The intent is to integrate with agent projects (e.g. RD-agent) where you need **
 - `.aider_fsm/state.json`: runner state
 - `.aider_fsm/logs/run_<id>.jsonl`: per-iteration logs
 - `.aider_fsm/artifacts/<run_id>/...`: verification and actions artifacts
-

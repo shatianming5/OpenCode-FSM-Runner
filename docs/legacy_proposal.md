@@ -1,3 +1,6 @@
+> NOTE (2026-02-03): 本文是 **Aider 集成**的历史 proposal。当前仓库已迁移为 **OpenCode agent + OpenCode server API** 驱动闭环。
+> 以 `README.md` / `docs/overview.md` 为准；本文仅保留做设计背景参考。
+
 下面给你一份**按“Python `Coder.run()` 驱动 FSM”**来做的、**最小不可分（MVP 级、但闭环完整）** proposal。核心目标：在**同一进程里保持上下文**，用一个**有限状态机**反复执行：
 
 > **读计划+读repo状态 → 更新计划/选下一步 → 执行修改 → 验收（测试/检查）→ 失败则修复或改计划 → 直到 Done 或 Stop**

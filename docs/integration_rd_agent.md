@@ -25,7 +25,7 @@ Keep the metrics small and stable; write full raw logs into artifacts.
 From the RD-agent repo root:
 
 ```bash
-python3 /path/to/Aider_runner/fsm_runner.py --repo . --pipeline pipeline.yml --goal "Run post-training RL benchmark" --model gpt-4o-mini
+python3 /path/to/Aider_runner/fsm_runner.py --repo . --pipeline pipeline.yml --goal "Run post-training RL benchmark" --model openai/gpt-4o-mini
 ```
 
 Artifacts are written under `.aider_fsm/artifacts/<run_id>/`.

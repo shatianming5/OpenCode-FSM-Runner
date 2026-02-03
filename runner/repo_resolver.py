@@ -95,7 +95,7 @@ def prepare_repo(repo_arg: str, *, clones_dir: Path | None = None) -> PreparedRe
         )
 
     # Make sure local commits (if any) won't fail due to missing identity.
-    subprocess.run(["git", "-C", str(dest), "config", "user.name", "aider-fsm"], env=env, check=False)
-    subprocess.run(["git", "-C", str(dest), "config", "user.email", "aider-fsm@example.com"], env=env, check=False)
+    subprocess.run(["git", "-C", str(dest), "config", "user.name", "opencode-fsm"], env=env, check=False)
+    subprocess.run(["git", "-C", str(dest), "config", "user.email", "opencode-fsm@example.com"], env=env, check=False)
 
     return PreparedRepo(repo=dest.resolve(), cloned_from=url)
