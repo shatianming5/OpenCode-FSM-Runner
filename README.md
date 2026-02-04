@@ -69,7 +69,7 @@ OPENCODE_SERVER_PASSWORD=... python3 -m runner --repo . --opencode-url http://12
 You can point `--repo` at a git URL; the runner will clone it to `/tmp/aider_fsm_targets/` by default:
 
 ```bash
-python3 -m runner --repo https://github.com/evalplus/evalplus --goal "运行 evalplus smoke benchmark" --test-cmd "python -V"
+python3 -m runner --repo https://github.com/<owner>/<repo> --goal "运行 smoke benchmark" --test-cmd "python -V"
 ```
 
 Use `--clone-dir` to choose a different clone location. The runner will also load `.env` by default (disable with `--env-file ''`).
@@ -141,7 +141,7 @@ you can import the helper wrapper:
 ```python
 from runner.env_local import open_env, rollout_and_evaluate
 
-env = open_env("https://github.com/evalplus/evalplus", require_pipeline=False)
+env = open_env("https://github.com/<owner>/<repo>", require_pipeline=False)
 rollout_res, eval_res = rollout_and_evaluate(env, env_overrides={"OPENCODE_MODEL": "opencode/gpt-5-nano"})
 print(eval_res.metrics)
 print(eval_res.artifacts_dir)

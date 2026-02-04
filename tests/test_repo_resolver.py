@@ -15,11 +15,11 @@ from runner.repo_resolver import is_probably_repo_url, prepare_repo
 @pytest.mark.parametrize(
     ("s", "ok"),
     [
-        ("https://github.com/evalplus/evalplus", True),
-        ("https://github.com/evalplus/evalplus.git", True),
-        ("git@github.com:evalplus/evalplus.git", True),
-        ("ssh://git@github.com/evalplus/evalplus.git", True),
-        ("evalplus/evalplus", True),
+        ("https://github.com/example-org/example-repo", True),
+        ("https://github.com/example-org/example-repo.git", True),
+        ("git@github.com:example-org/example-repo.git", True),
+        ("ssh://git@github.com/example-org/example-repo.git", True),
+        ("example-org/example-repo", True),
         (".", False),
         ("", False),
         (" /tmp/repo ", False),
@@ -82,9 +82,9 @@ def test_prepare_repo_github_archive_fallback_on_git_clone_failure(tmp_path: Pat
 
 
 def test_prepare_repo_hf_dataset_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    url = "https://huggingface.co/datasets/openai/gsm8k"
+    url = "https://huggingface.co/datasets/example/dataset"
     api_json = {
-        "id": "openai/gsm8k",
+        "id": "example/dataset",
         "sha": "deadbeef",
         "private": False,
         "gated": False,
@@ -104,7 +104,7 @@ def test_prepare_repo_hf_dataset_download(tmp_path: Path, monkeypatch: pytest.Mo
 
     def fake_urlopen(req, *args, **kwargs):
         target = str(getattr(req, "full_url", req))
-        if target == "https://huggingface.co/api/datasets/openai/gsm8k":
+        if target == "https://huggingface.co/api/datasets/example/dataset":
             return _FakeHTTPResponse(json.dumps(api_json).encode("utf-8"))
         if "/resolve/deadbeef/" in target:
             rel = target.split("/resolve/deadbeef/", 1)[1]
@@ -117,9 +117,9 @@ def test_prepare_repo_hf_dataset_download(tmp_path: Path, monkeypatch: pytest.Mo
 
     prepared = prepare_repo(url, clones_dir=tmp_path)
     assert prepared.cloned_from == url
-    assert prepared.repo.name.startswith("hf_openai_gsm8k_")
+    assert prepared.repo.name.startswith("hf_example_dataset_")
     assert (prepared.repo / "README.md").read_text(encoding="utf-8") == "hello\n"
     assert (prepared.repo / "main" / "train-00000-of-00001.parquet").read_text(encoding="utf-8") == "parquet\n"
 
     manifest = (prepared.repo / "data" / "hf_manifest.json").read_text(encoding="utf-8")
-    assert "openai/gsm8k" in manifest
+    assert "example/dataset" in manifest
