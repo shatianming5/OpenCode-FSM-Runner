@@ -29,3 +29,17 @@ Bootstrap writes:
 - `bootstrap_env.json`: applied env mapping (sensitive keys are redacted)
 - `bootstrap_summary.json`: ok/failed_index/total_results
 - `bootstrap_cmdXX_tryYY_*`: stdout/stderr/result per command attempt
+
+## Example: uv + venv (recommended)
+
+This pattern creates an isolated venv under `.aider_fsm/venv`, installs deps, then prepends it to `PATH`
+so pipeline stages can run without hardcoding interpreter paths:
+
+```yaml
+version: 1
+cmds:
+  - uv venv .aider_fsm/venv
+  - uv pip install -r requirements.txt
+env:
+  PATH: ".aider_fsm/venv/bin:$PATH"
+```

@@ -132,3 +132,19 @@ See `examples/actions.example.yml`.
 ```bash
 pytest -q
 ```
+
+## Programmatic (same-machine) usage
+
+If you want to call a target repo's rollout/evaluation stages from other Python code (no deployment),
+you can import the helper wrapper:
+
+```python
+from runner.env_local import open_env, rollout_and_evaluate
+
+env = open_env("https://github.com/evalplus/evalplus", require_pipeline=False)
+rollout_res, eval_res = rollout_and_evaluate(env, env_overrides={"OPENCODE_MODEL": "opencode/gpt-5-nano"})
+print(eval_res.metrics)
+print(eval_res.artifacts_dir)
+```
+
+This runs the repo's `pipeline.yml` stages (or auto-scaffolds a minimal contract if missing) and returns artifacts/metrics.
