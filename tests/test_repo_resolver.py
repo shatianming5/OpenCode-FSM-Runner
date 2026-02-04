@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytest
 
@@ -77,3 +79,47 @@ def test_prepare_repo_github_archive_fallback_on_git_clone_failure(tmp_path: Pat
     prepared = prepare_repo(url, clones_dir=tmp_path)
     assert prepared.cloned_from == url
     assert (prepared.repo / "README.md").read_text(encoding="utf-8") == "hello\n"
+
+
+def test_prepare_repo_hf_dataset_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    url = "https://huggingface.co/datasets/openai/gsm8k"
+    api_json = {
+        "id": "openai/gsm8k",
+        "sha": "deadbeef",
+        "private": False,
+        "gated": False,
+        "siblings": [
+            {"rfilename": "README.md"},
+            {"rfilename": "main/train-00000-of-00001.parquet"},
+        ],
+    }
+    files = {
+        "README.md": b"hello\n",
+        "main/train-00000-of-00001.parquet": b"parquet\n",
+    }
+
+    def fake_run(cmd, *args, **kwargs):
+        # Always succeed (git init/add/commit best-effort).
+        return _FakeCompletedProcess(returncode=0, stdout="", stderr="")
+
+    def fake_urlopen(req, *args, **kwargs):
+        target = str(getattr(req, "full_url", req))
+        if target == "https://huggingface.co/api/datasets/openai/gsm8k":
+            return _FakeHTTPResponse(json.dumps(api_json).encode("utf-8"))
+        if "/resolve/deadbeef/" in target:
+            rel = target.split("/resolve/deadbeef/", 1)[1]
+            rel = unquote(rel)
+            return _FakeHTTPResponse(files[rel])
+        raise AssertionError(f"unexpected url: {target}")
+
+    monkeypatch.setattr("runner.repo_resolver.subprocess.run", fake_run)
+    monkeypatch.setattr("runner.repo_resolver.urlopen", fake_urlopen)
+
+    prepared = prepare_repo(url, clones_dir=tmp_path)
+    assert prepared.cloned_from == url
+    assert prepared.repo.name.startswith("hf_openai_gsm8k_")
+    assert (prepared.repo / "README.md").read_text(encoding="utf-8") == "hello\n"
+    assert (prepared.repo / "main" / "train-00000-of-00001.parquet").read_text(encoding="utf-8") == "parquet\n"
+
+    manifest = (prepared.repo / "data" / "hf_manifest.json").read_text(encoding="utf-8")
+    assert "openai/gsm8k" in manifest
