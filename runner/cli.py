@@ -32,7 +32,7 @@ def _list_opencode_models() -> list[str]:
         return []
     if res.returncode != 0:
         return []
-    ansi = re.compile(r"\x1b\\[[0-9;]*m")
+    ansi = re.compile(r"\x1b\[[0-9;]*m")
     models: list[str] = []
     for raw in (res.stdout or "").splitlines():
         line = ansi.sub("", raw).strip()
@@ -45,6 +45,13 @@ def _list_opencode_models() -> list[str]:
 def _resolve_model(raw_model: str) -> str:
     s = str(raw_model or "").strip()
     if not s:
+        candidates = _list_opencode_models()
+        if "openai/gpt-4o-mini" in candidates:
+            return "openai/gpt-4o-mini"
+        if "opencode/gpt-5-nano" in candidates:
+            return "opencode/gpt-5-nano"
+        if candidates:
+            return candidates[0]
         return "openai/gpt-4o-mini"
     if "/" in s:
         return s
