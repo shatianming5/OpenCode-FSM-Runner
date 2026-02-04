@@ -7,8 +7,9 @@
 3. `deploy.setup` (optional)
 4. `deploy.health` (optional)
 5. `rollout` (optional)
-6. `benchmark` (optional)
-7. `benchmark.metrics` validation (optional)
+6. `evaluation` (optional)
+7. `benchmark` (optional)
+8. `evaluation.metrics` / `benchmark.metrics` validation (optional)
 
 See `examples/pipeline.example.yml` and `examples/pipeline.benchmark_skeleton.yml`.
 
@@ -20,6 +21,7 @@ See `examples/pipeline.example.yml` and `examples/pipeline.benchmark_skeleton.ym
 - `auth`: optional login steps
 - `deploy`: optional deploy steps
 - `rollout`: optional RL/post-training rollout steps
+- `evaluation`: optional evaluation steps + metrics validation (preferred)
 - `benchmark`: optional benchmark steps + metrics validation
 - `artifacts`: output directory for run artifacts
 
@@ -56,6 +58,13 @@ See `examples/pipeline.example.yml` and `examples/pipeline.benchmark_skeleton.ym
 - `run_cmds`
 - `timeout_seconds`, `retries`, `env`, `workdir`
 
+## `evaluation` (optional)
+
+- `run_cmds`
+- `metrics_path`: path to a JSON file produced by the evaluation (relative to repo)
+- `required_keys`: list of keys that must exist in the metrics JSON
+- `timeout_seconds`, `retries`, `env`, `workdir`
+
 ## `benchmark` (optional)
 
 - `run_cmds`
@@ -75,6 +84,6 @@ For repo-owned, always-on environment setup, use `.aider_fsm/bootstrap.yml` (see
 
 For every executed stage command, the runner sets:
 
-- `AIDER_FSM_STAGE`: stage name (e.g. `tests`, `deploy_setup`, `rollout`, `benchmark`)
+- `AIDER_FSM_STAGE`: stage name (e.g. `tests`, `deploy_setup`, `rollout`, `evaluation`, `benchmark`)
 - `AIDER_FSM_ARTIFACTS_DIR`: stage artifacts directory (absolute path)
 - `AIDER_FSM_REPO_ROOT`: repo root directory (absolute path)

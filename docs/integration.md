@@ -1,4 +1,4 @@
-# Integrating a target repo (deploy + rollout + benchmark)
+# Integrating a target repo (deploy + rollout + evaluation + benchmark)
 
 The runner is intentionally **generic**. Integration is done through:
 
@@ -12,8 +12,9 @@ The runner is intentionally **generic**. Integration is done through:
 - Fill in:
   - `deploy.setup_cmds` / `deploy.health_cmds` (if you deploy anything)
   - `rollout.run_cmds` (optional) to generate rollouts/trajectories
-  - `benchmark.run_cmds` to run the benchmark and write `benchmark.metrics_path`
-  - `benchmark.required_keys` for your evaluation KPIs
+  - `evaluation.run_cmds` to run evaluation and write `evaluation.metrics_path` (recommended)
+  - `evaluation.required_keys` for your evaluation KPIs
+  - (optional) `benchmark.run_cmds` for extra benchmark steps (if you use `benchmark.metrics_path`, it will also be validated)
 
 ## Environment bootstrap (recommended)
 
@@ -22,8 +23,8 @@ If your repo needs a reproducible environment, add `.aider_fsm/bootstrap.yml` (s
 
 ## Metrics JSON contract
 
-The runner expects a JSON **object** at `benchmark.metrics_path`.
-It validates that all `benchmark.required_keys` are present.
+The runner expects a JSON **object** at `evaluation.metrics_path` (recommended) or `benchmark.metrics_path`.
+It validates that all `evaluation.required_keys` / `benchmark.required_keys` are present (when configured).
 
 Keep the metrics small and stable; write full raw logs into artifacts.
 

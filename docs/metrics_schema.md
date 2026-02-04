@@ -1,11 +1,12 @@
 # Metrics schema (recommended)
 
-The runner only validates that `benchmark.required_keys` exist in the JSON at `benchmark.metrics_path`.
+The runner validates that `evaluation.required_keys` exist in the JSON at `evaluation.metrics_path` (preferred),
+or that `benchmark.required_keys` exist in the JSON at `benchmark.metrics_path`.
 To make results comparable across repos (evaluation + rollout + post-training), this doc recommends a stable schema.
 
 ## File(s)
 
-- `benchmark.metrics_path` (required if you want metrics validation)
+- `evaluation.metrics_path` or `benchmark.metrics_path` (required if you want metrics validation)
 - Optional rollout artifact: `.aider_fsm/rollout.json`
 
 ## Minimal metrics JSON

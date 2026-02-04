@@ -8,7 +8,7 @@ Cycle:
 1) snapshot repo + `PLAN.md`  
 2) update plan (model may ONLY edit `PLAN.md`)  
 3) execute exactly one `Next` step (model may NOT edit `PLAN.md` or `pipeline.yml`)  
-4) verify via `pipeline.yml` (tests → deploy → rollout → benchmark → metrics)  
+4) verify via `pipeline.yml` (tests → deploy → rollout → evaluation → benchmark → metrics)  
 5) pass → mark Done; fail → fix or re-plan; optionally request `.aider_fsm/actions.yml`  
 
 中文：这是一个“计划-执行-验收”的闭环 runner，重点是可审计、可复现、可安全执行（适合作为 benchmark/deploy 验收框架）。
@@ -99,6 +99,7 @@ Notes:
 - Artifacts are written under `.aider_fsm/artifacts/<run_id>/` (override via `--artifacts-dir`).
 - If you need interactive auth, set `pipeline.auth.interactive: true` and run with `--unattended guided`.
 - `rollout` is an optional stage for post-training RL rollouts/trajectories (see `docs/pipeline_spec.md`).
+- `evaluation` is an optional stage for evaluation/benchmark runs + metrics validation (see `docs/pipeline_spec.md`).
 
 Examples:
 

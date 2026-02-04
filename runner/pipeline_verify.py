@@ -212,6 +212,7 @@ def run_pipeline_verification(
     deploy_setup_res: StageResult | None = None
     deploy_health_res: StageResult | None = None
     rollout_res: StageResult | None = None
+    eval_res: StageResult | None = None
     bench_res: StageResult | None = None
     metrics_path: str | None = None
     metrics: dict[str, Any] | None = None
@@ -434,6 +435,120 @@ def run_pipeline_verification(
                     metrics_errors=metrics_errors,
                 )
 
+        if pipeline and pipeline.evaluation_run_cmds:
+            eval_env = safe_env(env_base, pipeline.evaluation_env, unattended=unattended)
+            eval_workdir, eval_wd_err = _workdir_or_fail("evaluation", pipeline.evaluation_workdir)
+            if eval_wd_err is not None:
+                failed_stage = "evaluation"
+                return VerificationResult(
+                    ok=False,
+                    failed_stage=failed_stage,
+                    auth=auth_res,
+                    tests=tests_res,
+                    deploy_setup=deploy_setup_res,
+                    deploy_health=deploy_health_res,
+                    rollout=rollout_res,
+                    evaluation=eval_wd_err,
+                    metrics_errors=metrics_errors,
+                )
+            eval_timeout = pipeline.evaluation_timeout_seconds
+            eval_res = _run_stage(
+                repo,
+                stage="evaluation",
+                cmds=pipeline.evaluation_run_cmds,
+                workdir=eval_workdir,
+                env=eval_env,
+                timeout_seconds=eval_timeout,
+                retries=pipeline.evaluation_retries,
+                interactive=False,
+                unattended=unattended,
+                pipeline=pipeline,
+                artifacts_dir=artifacts_dir,
+            )
+            if not eval_res.ok:
+                failed_stage = "evaluation"
+                return VerificationResult(
+                    ok=False,
+                    failed_stage=failed_stage,
+                    auth=auth_res,
+                    tests=tests_res,
+                    deploy_setup=deploy_setup_res,
+                    deploy_health=deploy_health_res,
+                    rollout=rollout_res,
+                    evaluation=eval_res,
+                    metrics_errors=metrics_errors,
+                )
+
+        if pipeline and pipeline.evaluation_metrics_path:
+            mpath = Path(pipeline.evaluation_metrics_path).expanduser()
+            if not mpath.is_absolute():
+                mpath = repo / mpath
+            eval_metrics_path = str(mpath)
+            if not mpath.exists():
+                failed_stage = "metrics"
+                metrics_errors.append(f"evaluation.metrics_file_missing: {mpath}")
+                return VerificationResult(
+                    ok=False,
+                    failed_stage=failed_stage,
+                    auth=auth_res,
+                    tests=tests_res,
+                    deploy_setup=deploy_setup_res,
+                    deploy_health=deploy_health_res,
+                    rollout=rollout_res,
+                    evaluation=eval_res,
+                    benchmark=bench_res,
+                    metrics_path=eval_metrics_path,
+                    metrics_errors=metrics_errors,
+                )
+
+            # Always snapshot the produced metrics file for reproducibility, even if it is invalid JSON.
+            write_text(artifacts_dir / "metrics_evaluation.json", read_text_if_exists(mpath))
+            if metrics_path is None:
+                write_text(artifacts_dir / "metrics.json", read_text_if_exists(mpath))
+
+            eval_metrics, err = _read_json(mpath)
+            if err:
+                failed_stage = "metrics"
+                metrics_errors.append(f"evaluation.{err}")
+                return VerificationResult(
+                    ok=False,
+                    failed_stage=failed_stage,
+                    auth=auth_res,
+                    tests=tests_res,
+                    deploy_setup=deploy_setup_res,
+                    deploy_health=deploy_health_res,
+                    rollout=rollout_res,
+                    evaluation=eval_res,
+                    benchmark=bench_res,
+                    metrics_path=eval_metrics_path,
+                    metrics=eval_metrics,
+                    metrics_errors=metrics_errors,
+                )
+
+            missing = _validate_metrics(eval_metrics or {}, pipeline.evaluation_required_keys)
+            if missing:
+                failed_stage = "metrics"
+                metrics_errors.append("evaluation.missing_keys: " + ", ".join(missing))
+                return VerificationResult(
+                    ok=False,
+                    failed_stage=failed_stage,
+                    auth=auth_res,
+                    tests=tests_res,
+                    deploy_setup=deploy_setup_res,
+                    deploy_health=deploy_health_res,
+                    rollout=rollout_res,
+                    evaluation=eval_res,
+                    benchmark=bench_res,
+                    metrics_path=eval_metrics_path,
+                    metrics=eval_metrics,
+                    metrics_errors=metrics_errors,
+                )
+
+            # Prefer evaluation metrics as the "primary" metrics payload.
+            if metrics_path is None:
+                metrics_path = eval_metrics_path
+                metrics = eval_metrics
+
         if pipeline and pipeline.benchmark_run_cmds:
             bench_env = safe_env(env_base, pipeline.benchmark_env, unattended=unattended)
             bench_workdir, bench_wd_err = _workdir_or_fail("benchmark", pipeline.benchmark_workdir)
@@ -447,6 +562,7 @@ def run_pipeline_verification(
                     deploy_setup=deploy_setup_res,
                     deploy_health=deploy_health_res,
                     rollout=rollout_res,
+                    evaluation=eval_res,
                     benchmark=bench_wd_err,
                     metrics_errors=metrics_errors,
                 )
@@ -474,6 +590,7 @@ def run_pipeline_verification(
                     deploy_setup=deploy_setup_res,
                     deploy_health=deploy_health_res,
                     rollout=rollout_res,
+                    evaluation=eval_res,
                     benchmark=bench_res,
                     metrics_errors=metrics_errors,
                 )
@@ -482,7 +599,7 @@ def run_pipeline_verification(
                 mpath = Path(pipeline.benchmark_metrics_path).expanduser()
                 if not mpath.is_absolute():
                     mpath = repo / mpath
-                metrics_path = str(mpath)
+                bench_metrics_path = str(mpath)
                 if not mpath.exists():
                     failed_stage = "metrics"
                     metrics_errors.append(f"metrics_file_missing: {mpath}")
@@ -494,15 +611,18 @@ def run_pipeline_verification(
                         deploy_setup=deploy_setup_res,
                         deploy_health=deploy_health_res,
                         rollout=rollout_res,
+                        evaluation=eval_res,
                         benchmark=bench_res,
-                        metrics_path=metrics_path,
+                        metrics_path=bench_metrics_path,
                         metrics_errors=metrics_errors,
                     )
 
                 # Always snapshot the produced metrics file for reproducibility, even if it is invalid JSON.
-                write_text(artifacts_dir / "metrics.json", read_text_if_exists(mpath))
+                write_text(artifacts_dir / "metrics_benchmark.json", read_text_if_exists(mpath))
+                if metrics_path is None:
+                    write_text(artifacts_dir / "metrics.json", read_text_if_exists(mpath))
 
-                metrics, err = _read_json(mpath)
+                bench_metrics, err = _read_json(mpath)
                 if err:
                     failed_stage = "metrics"
                     metrics_errors.append(err)
@@ -514,13 +634,14 @@ def run_pipeline_verification(
                         deploy_setup=deploy_setup_res,
                         deploy_health=deploy_health_res,
                         rollout=rollout_res,
+                        evaluation=eval_res,
                         benchmark=bench_res,
-                        metrics_path=metrics_path,
-                        metrics=metrics,
+                        metrics_path=bench_metrics_path,
+                        metrics=bench_metrics,
                         metrics_errors=metrics_errors,
                     )
 
-                missing = _validate_metrics(metrics or {}, pipeline.benchmark_required_keys)
+                missing = _validate_metrics(bench_metrics or {}, pipeline.benchmark_required_keys)
                 if missing:
                     failed_stage = "metrics"
                     metrics_errors.append("missing_keys: " + ", ".join(missing))
@@ -532,11 +653,17 @@ def run_pipeline_verification(
                         deploy_setup=deploy_setup_res,
                         deploy_health=deploy_health_res,
                         rollout=rollout_res,
+                        evaluation=eval_res,
                         benchmark=bench_res,
-                        metrics_path=metrics_path,
-                        metrics=metrics,
+                        metrics_path=bench_metrics_path,
+                        metrics=bench_metrics,
                         metrics_errors=metrics_errors,
                     )
+
+                # Back-compat: if no evaluation metrics were produced, use benchmark metrics as primary.
+                if metrics_path is None:
+                    metrics_path = bench_metrics_path
+                    metrics = bench_metrics
 
         ok = True
         return VerificationResult(
@@ -547,6 +674,7 @@ def run_pipeline_verification(
             deploy_setup=deploy_setup_res,
             deploy_health=deploy_health_res,
             rollout=rollout_res,
+            evaluation=eval_res,
             benchmark=bench_res,
             metrics_path=metrics_path,
             metrics=metrics,

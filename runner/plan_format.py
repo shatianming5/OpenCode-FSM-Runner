@@ -18,9 +18,16 @@ def plan_template(goal: str, test_cmd: str, *, pipeline: PipelineSpec | None = N
             acceptance.append("- [ ] Deploy succeeds (see pipeline.yml)")
         if getattr(pipeline, "rollout_run_cmds", None):
             acceptance.append("- [ ] Rollout succeeds (see pipeline.yml)")
+        if getattr(pipeline, "evaluation_run_cmds", None):
+            acceptance.append("- [ ] Evaluation succeeds (see pipeline.yml)")
         if pipeline.benchmark_run_cmds:
             acceptance.append("- [ ] Benchmark succeeds (see pipeline.yml)")
-        if pipeline.benchmark_metrics_path or pipeline.benchmark_required_keys:
+        if (
+            getattr(pipeline, "evaluation_metrics_path", None)
+            or getattr(pipeline, "evaluation_required_keys", None)
+            or pipeline.benchmark_metrics_path
+            or pipeline.benchmark_required_keys
+        ):
             acceptance.append("- [ ] Metrics file/keys present (see pipeline.yml)")
     return (
         "# PLAN\n"

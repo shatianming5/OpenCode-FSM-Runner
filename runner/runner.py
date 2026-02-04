@@ -220,13 +220,46 @@ def run(config: RunnerConfig, *, agent: AgentClient | None = None) -> int:
                     missing_fields.append("security.max_cmd_seconds")
 
                 if bool(config.scaffold_require_metrics):
-                    required_keys = ["score"]
-                    if not list(parsed.benchmark_run_cmds or []):
-                        missing_fields.append("benchmark.run_cmds")
-                    if not str(parsed.benchmark_metrics_path or "").strip():
-                        missing_fields.append("benchmark.metrics_path")
-                    if any(k not in set(parsed.benchmark_required_keys or []) for k in required_keys):
-                        missing_fields.append("benchmark.required_keys (missing: score)")
+                    required_keys = {"score"}
+                    eval_ok = (
+                        bool(list(parsed.evaluation_run_cmds or []))
+                        and bool(str(parsed.evaluation_metrics_path or "").strip())
+                        and required_keys.issubset(set(parsed.evaluation_required_keys or []))
+                    )
+                    bench_ok = (
+                        bool(list(parsed.benchmark_run_cmds or []))
+                        and bool(str(parsed.benchmark_metrics_path or "").strip())
+                        and required_keys.issubset(set(parsed.benchmark_required_keys or []))
+                    )
+
+                    # Require at least ONE metrics-producing stage (evaluation or benchmark).
+                    if not (eval_ok or bench_ok):
+                        eval_touched = bool(
+                            (parsed.evaluation_run_cmds or [])
+                            or str(parsed.evaluation_metrics_path or "").strip()
+                            or (parsed.evaluation_required_keys or [])
+                        )
+                        bench_touched = bool(
+                            (parsed.benchmark_run_cmds or [])
+                            or str(parsed.benchmark_metrics_path or "").strip()
+                            or (parsed.benchmark_required_keys or [])
+                        )
+
+                        if eval_touched or not bench_touched:
+                            if not list(parsed.evaluation_run_cmds or []):
+                                missing_fields.append("evaluation.run_cmds")
+                            if not str(parsed.evaluation_metrics_path or "").strip():
+                                missing_fields.append("evaluation.metrics_path")
+                            if not required_keys.issubset(set(parsed.evaluation_required_keys or [])):
+                                missing_fields.append("evaluation.required_keys (missing: score)")
+
+                        if bench_touched:
+                            if not list(parsed.benchmark_run_cmds or []):
+                                missing_fields.append("benchmark.run_cmds")
+                            if not str(parsed.benchmark_metrics_path or "").strip():
+                                missing_fields.append("benchmark.metrics_path")
+                            if not required_keys.issubset(set(parsed.benchmark_required_keys or [])):
+                                missing_fields.append("benchmark.required_keys (missing: score)")
 
                 if missing_fields:
                     pipeline_validation_reason = "missing_scaffold_requirements"
@@ -396,6 +429,7 @@ def run(config: RunnerConfig, *, agent: AgentClient | None = None) -> int:
                     "deploy_setup_rc": stage_rc(verify.deploy_setup),
                     "deploy_health_rc": stage_rc(verify.deploy_health),
                     "rollout_rc": stage_rc(verify.rollout),
+                    "evaluation_rc": stage_rc(verify.evaluation),
                     "benchmark_rc": stage_rc(verify.benchmark),
                     "metrics_path": verify.metrics_path,
                     "metrics_errors": verify.metrics_errors or [],
@@ -604,6 +638,7 @@ def run(config: RunnerConfig, *, agent: AgentClient | None = None) -> int:
                 state["last_deploy_setup_rc"] = stage_rc(verify.deploy_setup)
                 state["last_deploy_health_rc"] = stage_rc(verify.deploy_health)
                 state["last_rollout_rc"] = stage_rc(verify.rollout)
+                state["last_evaluation_rc"] = stage_rc(verify.evaluation)
                 state["last_benchmark_rc"] = stage_rc(verify.benchmark)
                 state["last_metrics_ok"] = bool(verify.ok or verify.failed_stage != "metrics")
                 if verify.bootstrap is not None:
@@ -637,6 +672,7 @@ def run(config: RunnerConfig, *, agent: AgentClient | None = None) -> int:
                     + fmt_stage_tail("DEPLOY_SETUP", verify.deploy_setup)
                     + fmt_stage_tail("DEPLOY_HEALTH", verify.deploy_health)
                     + fmt_stage_tail("ROLLOUT", verify.rollout)
+                    + fmt_stage_tail("EVALUATION", verify.evaluation)
                     + fmt_stage_tail("BENCHMARK", verify.benchmark)
                     + (f"METRICS_ERRORS={verify.metrics_errors}\n" if (verify.metrics_errors or []) else "")
                 )
@@ -723,6 +759,7 @@ def run(config: RunnerConfig, *, agent: AgentClient | None = None) -> int:
                     "deploy_setup_rc": stage_rc(verify.deploy_setup),
                     "deploy_health_rc": stage_rc(verify.deploy_health),
                     "rollout_rc": stage_rc(verify.rollout),
+                    "evaluation_rc": stage_rc(verify.evaluation),
                     "benchmark_rc": stage_rc(verify.benchmark),
                     "metrics_path": verify.metrics_path,
                     "metrics_errors": verify.metrics_errors or [],
@@ -732,6 +769,7 @@ def run(config: RunnerConfig, *, agent: AgentClient | None = None) -> int:
             state["last_deploy_setup_rc"] = stage_rc(verify.deploy_setup)
             state["last_deploy_health_rc"] = stage_rc(verify.deploy_health)
             state["last_rollout_rc"] = stage_rc(verify.rollout)
+            state["last_evaluation_rc"] = stage_rc(verify.evaluation)
             state["last_benchmark_rc"] = stage_rc(verify.benchmark)
             state["last_metrics_ok"] = bool(verify.ok or verify.failed_stage != "metrics")
             if verify.bootstrap is not None:
@@ -813,6 +851,8 @@ def run(config: RunnerConfig, *, agent: AgentClient | None = None) -> int:
                     + fmt_stage_tail("TESTS", verify.tests)
                     + fmt_stage_tail("DEPLOY_SETUP", verify.deploy_setup)
                     + fmt_stage_tail("DEPLOY_HEALTH", verify.deploy_health)
+                    + fmt_stage_tail("ROLLOUT", verify.rollout)
+                    + fmt_stage_tail("EVALUATION", verify.evaluation)
                     + fmt_stage_tail("BENCHMARK", verify.benchmark)
                     + (f"METRICS_ERRORS={verify.metrics_errors}\n" if (verify.metrics_errors or []) else "")
                 )

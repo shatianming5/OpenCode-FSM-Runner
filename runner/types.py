@@ -30,6 +30,7 @@ class VerificationResult:
     deploy_setup: StageResult | None = None
     deploy_health: StageResult | None = None
     rollout: StageResult | None = None
+    evaluation: StageResult | None = None
     benchmark: StageResult | None = None
     metrics_path: str | None = None
     metrics: dict[str, Any] | None = None

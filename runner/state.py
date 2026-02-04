@@ -42,6 +42,7 @@ def default_state(
         "last_deploy_setup_rc": None,
         "last_deploy_health_rc": None,
         "last_benchmark_rc": None,
+        "last_evaluation_rc": None,
         "last_metrics_ok": None,
         "last_exit_reason": None,
         "updated_at": now_iso(),

@@ -48,6 +48,11 @@ def test_load_pipeline_spec_ok(tmp_path: Path):
                 "  retries: 1",
                 "  env: {ROLLOUT_MODE: quick}",
                 "  workdir: .",
+                "evaluation:",
+                "  run_cmds: [echo eval]",
+                "  timeout_seconds: 250",
+                "  metrics_path: eval_metrics.json",
+                "  required_keys: [score]",
                 "benchmark:",
                 "  run_cmds: [echo bench]",
                 "  timeout_seconds: 300",
@@ -84,6 +89,10 @@ def test_load_pipeline_spec_ok(tmp_path: Path):
     assert spec.rollout_retries == 1
     assert spec.rollout_env["ROLLOUT_MODE"] == "quick"
     assert spec.rollout_workdir == "."
+    assert spec.evaluation_run_cmds == ["echo eval"]
+    assert spec.evaluation_timeout_seconds == 250
+    assert spec.evaluation_metrics_path == "eval_metrics.json"
+    assert spec.evaluation_required_keys == ["score"]
     assert spec.benchmark_metrics_path == "metrics.json"
     assert spec.benchmark_required_keys == ["score"]
     assert spec.artifacts_out_dir == ".aider_fsm/artifacts"
@@ -118,12 +127,51 @@ def test_run_pipeline_verification_metrics_ok(tmp_path: Path):
     assert verify.metrics == {"score": 1}
 
 
+def test_run_pipeline_verification_evaluation_metrics_ok(tmp_path: Path):
+    (tmp_path / "metrics.json").write_text('{"score": 1}\n', encoding="utf-8")
+    pipeline = PipelineSpec(
+        evaluation_run_cmds=[_py_cmd(0)],
+        evaluation_metrics_path="metrics.json",
+        evaluation_required_keys=["score"],
+    )
+    verify = run_pipeline_verification(
+        tmp_path,
+        pipeline=pipeline,
+        tests_cmds=[_py_cmd(0)],
+        artifacts_dir=tmp_path / "artifacts",
+    )
+    assert verify.ok is True
+    assert verify.failed_stage is None
+    assert verify.evaluation is not None
+    assert verify.evaluation.ok is True
+    assert verify.metrics_path is not None
+    assert verify.metrics == {"score": 1}
+
+
 def test_run_pipeline_verification_metrics_missing_key(tmp_path: Path):
     (tmp_path / "metrics.json").write_text("{}\n", encoding="utf-8")
     pipeline = PipelineSpec(
         benchmark_run_cmds=[_py_cmd(0)],
         benchmark_metrics_path="metrics.json",
         benchmark_required_keys=["score"],
+    )
+    verify = run_pipeline_verification(
+        tmp_path,
+        pipeline=pipeline,
+        tests_cmds=[_py_cmd(0)],
+        artifacts_dir=tmp_path / "artifacts",
+    )
+    assert verify.ok is False
+    assert verify.failed_stage == "metrics"
+    assert any("missing_keys" in e for e in (verify.metrics_errors or []))
+
+
+def test_run_pipeline_verification_evaluation_metrics_missing_key(tmp_path: Path):
+    (tmp_path / "metrics.json").write_text("{}\n", encoding="utf-8")
+    pipeline = PipelineSpec(
+        evaluation_run_cmds=[_py_cmd(0)],
+        evaluation_metrics_path="metrics.json",
+        evaluation_required_keys=["score"],
     )
     verify = run_pipeline_verification(
         tmp_path,

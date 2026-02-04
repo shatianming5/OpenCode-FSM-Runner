@@ -46,6 +46,15 @@ class PipelineSpec:
     rollout_env: dict[str, str] = None  # type: ignore[assignment]
     rollout_workdir: str | None = None
 
+    # evaluation (optional; preferred over benchmark for "evaluation metrics")
+    evaluation_run_cmds: list[str] = None  # type: ignore[assignment]
+    evaluation_timeout_seconds: int | None = None
+    evaluation_retries: int = 0
+    evaluation_env: dict[str, str] = None  # type: ignore[assignment]
+    evaluation_workdir: str | None = None
+    evaluation_metrics_path: str | None = None
+    evaluation_required_keys: list[str] = None  # type: ignore[assignment]
+
     # benchmark
     benchmark_run_cmds: list[str] = None  # type: ignore[assignment]
     benchmark_timeout_seconds: int | None = None
@@ -86,7 +95,9 @@ class PipelineSpec:
             "deploy_health_cmds",
             "deploy_teardown_cmds",
             "rollout_run_cmds",
+            "evaluation_run_cmds",
             "benchmark_run_cmds",
+            "evaluation_required_keys",
             "benchmark_required_keys",
             "auth_cmds",
             "security_allowlist",
@@ -94,7 +105,7 @@ class PipelineSpec:
         ):
             if getattr(self, attr) is None:
                 object.__setattr__(self, attr, [])
-        for attr in ("tests_env", "deploy_env", "rollout_env", "benchmark_env", "auth_env"):
+        for attr in ("tests_env", "deploy_env", "rollout_env", "evaluation_env", "benchmark_env", "auth_env"):
             if getattr(self, attr) is None:
                 object.__setattr__(self, attr, {})
 
@@ -154,6 +165,7 @@ def load_pipeline_spec(path: Path) -> PipelineSpec:
     tests = _as_mapping(data.get("tests"), "tests")
     deploy = _as_mapping(data.get("deploy"), "deploy")
     rollout = _as_mapping(data.get("rollout"), "rollout")
+    evaluation = _as_mapping(data.get("evaluation"), "evaluation")
     bench = _as_mapping(data.get("benchmark"), "benchmark")
     artifacts = _as_mapping(data.get("artifacts"), "artifacts")
     tooling = _as_mapping(data.get("tooling"), "tooling")
@@ -161,6 +173,12 @@ def load_pipeline_spec(path: Path) -> PipelineSpec:
     security = _as_mapping(data.get("security"), "security")
 
     kubectl_dump = _as_mapping(deploy.get("kubectl_dump"), "deploy.kubectl_dump")
+
+    eval_required_keys = evaluation.get("required_keys") or []
+    if eval_required_keys is None:
+        eval_required_keys = []
+    if not isinstance(eval_required_keys, list) or not all(isinstance(k, str) for k in eval_required_keys):
+        raise ValueError("pipeline.evaluation.required_keys must be a list of strings")
 
     required_keys = bench.get("required_keys") or []
     if required_keys is None:
@@ -224,6 +242,17 @@ def load_pipeline_spec(path: Path) -> PipelineSpec:
         rollout_retries=int(rollout.get("retries") or 0),
         rollout_env=_as_env(rollout.get("env"), "rollout"),
         rollout_workdir=(str(rollout.get("workdir")).strip() if rollout.get("workdir") else None),
+        evaluation_run_cmds=_as_cmds(evaluation, cmd_key="run_cmd", cmds_key="run_cmds"),
+        evaluation_timeout_seconds=(
+            int(evaluation.get("timeout_seconds")) if evaluation.get("timeout_seconds") else None
+        ),
+        evaluation_retries=int(evaluation.get("retries") or 0),
+        evaluation_env=_as_env(evaluation.get("env"), "evaluation"),
+        evaluation_workdir=(str(evaluation.get("workdir")).strip() if evaluation.get("workdir") else None),
+        evaluation_metrics_path=(
+            str(evaluation.get("metrics_path")).strip() if evaluation.get("metrics_path") else None
+        ),
+        evaluation_required_keys=[str(k).strip() for k in eval_required_keys if str(k).strip()],
         benchmark_run_cmds=_as_cmds(bench, cmd_key="run_cmd", cmds_key="run_cmds"),
         benchmark_timeout_seconds=(int(bench.get("timeout_seconds")) if bench.get("timeout_seconds") else None),
         benchmark_retries=int(bench.get("retries") or 0),

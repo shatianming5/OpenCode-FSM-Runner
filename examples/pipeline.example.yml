@@ -52,7 +52,18 @@ rollout:
   # env: {ROLLOUT_MODE: quick}
   # workdir: .
 
+evaluation:
+  # Optional evaluation stage (recommended for metrics validation).
+  # run_cmds: [python -m myproj.eval --out .aider_fsm/metrics.json]
+  # timeout_seconds: 1800
+  # retries: 0
+  # env: {EVAL_MODE: quick}
+  # workdir: .
+  # metrics_path: .aider_fsm/metrics.json
+  required_keys: []
+
 benchmark:
+  # Optional extra benchmark stage (if you set metrics_path here, it will also be validated).
   # run_cmds: [python benchmark/run.py --out metrics.json]
   # timeout_seconds: 1800
   # retries: 0

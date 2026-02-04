@@ -3,7 +3,7 @@ version: 1
 # Example pipeline for deploy + rollout + benchmark automation.
 #
 # Runner executes commands in order:
-# auth -> tests -> deploy.setup -> deploy.health -> rollout -> benchmark -> metrics validation.
+# auth -> tests -> deploy.setup -> deploy.health -> rollout -> evaluation -> benchmark -> metrics validation.
 
 security:
   mode: safe
@@ -48,15 +48,22 @@ rollout:
   # timeout_seconds: 3600
   # retries: 0
 
-benchmark:
-  # Replace with your benchmark entrypoint. It MUST write `metrics_path`.
+evaluation:
+  # Replace with your evaluation entrypoint. It MUST write `metrics_path`.
   # run_cmds:
-  #   - python -m your_project.bench.run --out .aider_fsm/metrics.json
+  #   - python -m your_project.eval.run --out .aider_fsm/metrics.json
   metrics_path: .aider_fsm/metrics.json
   required_keys:
     - score
     # - success_rate
     # - avg_reward
+
+benchmark:
+  # Optional: extra benchmark stage (if you set metrics_path here, it will also be validated).
+  # run_cmds:
+  #   - python -m your_project.bench.run --out .aider_fsm/bench_metrics.json
+  # metrics_path: .aider_fsm/bench_metrics.json
+  # required_keys: [score]
 
 artifacts:
   out_dir: .aider_fsm/artifacts
