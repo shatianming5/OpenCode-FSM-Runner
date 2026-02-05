@@ -143,8 +143,10 @@ def _chat_completion(*, base_url: str, api_key: str | None, model: str, prompt: 
     return content if isinstance(content, str) else ""
 
 
-_RE_BOXED = re.compile(r"\\\\boxed\{([^}]*)\}")
 _RE_NUM = re.compile(r"-?\\d+(?:,\\d{3})*(?:\\.\\d+)?(?:/\\d+(?:\\.\\d+)?)?")
+
+
+_RE_FINAL_LINE = re.compile(r"(?im)^\\s*final\\s*[:：]\\s*(?P<ans>.+?)\\s*$")
 
 
 def _norm_number_str(s: str) -> str:
@@ -159,23 +161,49 @@ def _to_fraction(s: str) -> Fraction | None:
         return None
 
 
-def _extract_pred_final(text: str) -> str:
-    t = str(text or "")
-    m = _RE_BOXED.search(t)
+def _extract_final_line(text: str) -> str:
+    t = str(text or "").strip()
+    if not t:
+        return ""
+    m = _RE_FINAL_LINE.search(t)
     if m:
-        return str(m.group(1) or "").strip()
-    nums = _RE_NUM.findall(t)
-    if nums:
-        return str(nums[-1] or "").strip()
-    return ""
+        ans = str(m.group("ans") or "").strip()
+        if ans:
+            return ans
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    if not lines:
+        return t
+    last = lines[-1]
+    return re.sub(r"(?i)^final\\s*[:：]\\s*", "", last).strip()
 
 
-def _extract_gold_final(answer_text: str) -> str:
-    a = str(answer_text or "").strip()
-    if "####" in a:
-        return a.split("####")[-1].strip()
-    toks = a.split()
-    return toks[-1].strip() if toks else ""
+def _norm_answer_str(s: str) -> str:
+    t = str(s or "").strip().lower()
+    t = re.sub(r"\\s+", " ", t)
+    return t
+
+
+def _extract_last_number(text: str) -> str:
+    nums = _RE_NUM.findall(str(text or ""))
+    if not nums:
+        return ""
+    return str(nums[-1] or "").strip()
+
+
+def _answers_match(pred_text: str, gold_text: str) -> bool:
+    pred = _extract_final_line(pred_text)
+    gold = _extract_final_line(gold_text)
+
+    pred_num = _extract_last_number(pred)
+    gold_num = _extract_last_number(gold)
+    if pred_num and gold_num:
+        fp = _to_fraction(pred_num)
+        fg = _to_fraction(gold_num)
+        if fp is not None and fg is not None:
+            return fp == fg
+        return _norm_number_str(pred_num) == _norm_number_str(gold_num)
+
+    return _norm_answer_str(pred) == _norm_answer_str(gold)
 
 
 def _maybe_rollout_hf_qa_parquet(
@@ -227,11 +255,8 @@ def _maybe_rollout_hf_qa_parquet(
         return False, {"reason": "no_rows_in_test_parquet"}
 
     template = (
-        "Solve the following math problem efficiently and clearly. The last line\n"
-        "of your response should be of the following format: 'Therefore, the final\n"
-        "answer is: $\\\\boxed{{ANSWER}}$. I hope it is correct' (without quotes)\n"
-        "where ANSWER is just the final number or expression that solves the\n"
-        "problem.\n\n"
+        "Answer the following question. You may include reasoning, but put the final answer on the last line as:\n"
+        "FINAL: <answer>\n\n"
         "{prompt}"
     )
 
@@ -262,15 +287,7 @@ def _maybe_rollout_hf_qa_parquet(
                 errors.append(str(e))
                 completion = ""
 
-            gold = _extract_gold_final(a)
-            pred = _extract_pred_final(completion)
-            fg = _to_fraction(gold)
-            fp = _to_fraction(pred)
-            is_ok = False
-            if fg is not None and fp is not None:
-                is_ok = fg == fp
-            else:
-                is_ok = _norm_number_str(pred) == _norm_number_str(gold)
+            is_ok = _answers_match(completion, a)
 
             reward = 1.0 if is_ok else 0.0
             correct += int(is_ok)

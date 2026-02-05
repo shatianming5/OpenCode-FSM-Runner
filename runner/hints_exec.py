@@ -234,8 +234,6 @@ def run_hints(
         # Prefer commands that actually *run* evaluations/tests over setup/build steps.
         if "pytest" in s:
             p += 50
-        if "evalplus.evaluate" in s or " evalplus " in s:
-            p += 30
         if "evaluate" in s or "evaluation" in s:
             p += 20
         if "benchmark" in s:
@@ -298,69 +296,6 @@ def run_hints(
             return None
         return passed, failed, errors
 
-    def _maybe_generate_evalplus_samples(cmd: str) -> None:
-        """Best-effort helper: create a minimal `samples.jsonl` for evalplus `--samples` runs.
-
-        This makes the doc-hinted command `evalplus.evaluate --dataset X --samples samples.jsonl`
-        runnable in offline settings (no remote inference), without benchmark-specific hardcoding.
-        """
-        low = str(cmd or "").lower()
-        if "evalplus.evaluate" not in low or " --samples" not in f" {low} ":
-            return
-        try:
-            parts = shlex.split(str(cmd), posix=True)
-        except Exception:
-            return
-        if "--samples" not in parts:
-            return
-        try:
-            samples_token = parts[parts.index("--samples") + 1]
-        except Exception:
-            return
-        samples_path = Path(str(samples_token or "").strip())
-        if not samples_path:
-            return
-        if not samples_path.is_absolute():
-            samples_path = (repo / samples_path).resolve()
-        if samples_path.exists():
-            return
-
-        dataset = ""
-        if "--dataset" in parts:
-            try:
-                dataset = str(parts[parts.index("--dataset") + 1]).strip().lower()
-            except Exception:
-                dataset = ""
-        dataset = dataset or "humaneval"
-
-        try:
-            if dataset == "humaneval":
-                from evalplus.data import get_human_eval_plus  # type: ignore
-
-                tasks = get_human_eval_plus()
-            elif dataset == "mbpp":
-                from evalplus.data import get_mbpp_plus  # type: ignore
-
-                tasks = get_mbpp_plus()
-            else:
-                return
-        except Exception:
-            return
-
-        if not isinstance(tasks, dict) or not tasks:
-            return
-
-        try:
-            samples_path.parent.mkdir(parents=True, exist_ok=True)
-            with samples_path.open("w", encoding="utf-8") as f:
-                for task_id in tasks.keys():
-                    tid = str(task_id or "").strip()
-                    if not tid:
-                        continue
-                    f.write(json.dumps({"task_id": tid, "completion": "    pass"}, ensure_ascii=False) + "\n")
-        except Exception:
-            return
-
     for raw in raw_hints:
         if len(attempts) >= int(max(0, max_attempts)):
             break
@@ -380,9 +315,6 @@ def run_hints(
                 )
             )
             continue
-
-        # Best-effort: if the hinted command expects a local samples file, create it.
-        _maybe_generate_evalplus_samples(sanitized)
 
         t0 = time.monotonic()
         timed_out = False
