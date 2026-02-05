@@ -111,6 +111,8 @@ def repair_contract(
             "  Each JSONL line must be an object with keys: `prompt` (string), `completion` (string), `reward` (number).\n"
             "- IMPORTANT: if [EXTRA_CONTEXT] mentions `hf_qa_samples_too_few: expected>=N`, rollout MUST generate at least N valid samples\n"
             "  (and should have prompt diversity; do NOT use a single placeholder prompt like \"Hello\").\n"
+            "- IMPORTANT: if [EXTRA_CONTEXT] mentions `hf_qa_prompts_not_anchored`, rollout prompts MUST be anchored to the HF test parquet questions\n"
+            "  (i.e., include the real question text in the prompt; do NOT generate synthetic unrelated tasks).\n"
             "  The simplest benchmark-agnostic fix is to use the built-in helper: `$AIDER_FSM_PYTHON -m runner.generic_rollout`.\n"
             "- scripts MUST support `AIDER_RUNTIME_ENV_PATH` and local/remote inference inputs (`AIDER_TRAINED_MODEL_DIR` OR `AIDER_LLM_KIND=remote` + `AIDER_LLM_MODEL`, with endpoint/auth from env like `OPENAI_API_KEY`).\n"
             "- If you use an OpenAI-compatible client library that requires an API key, DO NOT embed secrets in files. Instead, read it from env (e.g. OPENAI_API_KEY) and fail clearly if missing.\n"

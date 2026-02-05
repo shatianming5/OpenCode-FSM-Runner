@@ -156,6 +156,47 @@ def _hf_parquet_qa_rows(repo_root: Path) -> int | None:
     return None
 
 
+def _hf_parquet_qa_question_samples(repo_root: Path, *, max_questions: int = 20) -> list[str] | None:
+    """If repo_root is an HF QA snapshot, return up to N sample questions from the test parquet."""
+    repo_root = Path(repo_root).resolve()
+    if not (repo_root / "data" / "hf_manifest.json").exists():
+        return None
+    parquet_path = _find_hf_test_parquet(repo_root)
+    if parquet_path is None:
+        return None
+    try:
+        import pyarrow.parquet as pq  # type: ignore
+    except Exception:
+        return None
+    try:
+        pf = pq.ParquetFile(parquet_path)
+    except Exception:
+        return None
+    try:
+        schema_names = set(str(n) for n in (pf.schema.names or []))
+    except Exception:
+        schema_names = set()
+    if "question" not in schema_names:
+        return None
+
+    n = max(1, int(max_questions))
+    out: list[str] = []
+    try:
+        for batch in pf.iter_batches(batch_size=n, columns=["question"]):
+            try:
+                arr = batch.column(0).to_pylist()
+            except Exception:
+                arr = []
+            for q in arr:
+                s = str(q or "").strip()
+                if s:
+                    out.append(s)
+            break
+    except Exception:
+        return None
+    return out[:n] if out else None
+
+
 def _validate_rollout_samples(
     repo: Path,
     rollout_path: Path | None,
@@ -175,6 +216,7 @@ def _validate_rollout_samples(
       require that the samples JSONL contains at least `min(eval_limit, test_rows)` valid samples
       (defaults match `runner.generic_rollout`: smoke=8, full=64 when eval_limit is not set).
       Also require some prompt diversity to avoid trivial placeholder rollouts.
+      Also require prompts to be anchored to dataset questions (to avoid synthetic "fake" tasks).
     """
     repo = Path(repo).resolve()
     p = (rollout_path or (repo / ".aider_fsm" / "rollout.json")).resolve()
@@ -212,6 +254,24 @@ def _validate_rollout_samples(
     qa_rows = _hf_parquet_qa_rows(repo)
     expected_min = min(int(qa_rows), int(lim)) if isinstance(qa_rows, int) and qa_rows > 0 else None
     distinct_target = 1 if not expected_min or expected_min <= 1 else min(10, int(expected_min))
+    qa_questions = _hf_parquet_qa_question_samples(repo, max_questions=20) if expected_min is not None else None
+
+    def _norm_ws(s: str) -> str:
+        return " ".join(str(s or "").strip().lower().split())
+
+    qa_q_norms: list[str] = []
+    if isinstance(qa_questions, list):
+        seen: set[str] = set()
+        for q in qa_questions:
+            qn = _norm_ws(q)
+            if not qn:
+                continue
+            if qn in seen:
+                continue
+            seen.add(qn)
+            qa_q_norms.append(qn)
+    qa_anchor_target = min(5, len(qa_q_norms)) if qa_q_norms else 0
+    matched_anchors: set[str] = set()
 
     # Parse samples (bounded by the contract and, when applicable, by expected_min).
     valid = 0
@@ -238,9 +298,20 @@ def _validate_rollout_samples(
                     valid += 1
                     if len(distinct_prompts) < diversity_scan_cap:
                         distinct_prompts.add(prompt)
+                        if qa_anchor_target > 0 and len(matched_anchors) < qa_anchor_target:
+                            pn = _norm_ws(prompt)
+                            for qn in qa_q_norms:
+                                if qn and qn in pn:
+                                    matched_anchors.add(qn)
+                                    break
                     if expected_min is None and valid >= 1:
                         return True, "ok"
-                    if expected_min is not None and valid >= int(expected_min) and len(distinct_prompts) >= int(distinct_target):
+                    if (
+                        expected_min is not None
+                        and valid >= int(expected_min)
+                        and len(distinct_prompts) >= int(distinct_target)
+                        and (qa_anchor_target <= 0 or len(matched_anchors) >= int(qa_anchor_target))
+                    ):
                         return True, "ok"
     except Exception as e:
         return False, f"failed_to_read_samples_jsonl: {e}"
@@ -251,6 +322,8 @@ def _validate_rollout_samples(
         return False, f"hf_qa_samples_too_few: expected>={expected_min} got={valid}"
     if expected_min is not None and len(distinct_prompts) < int(distinct_target):
         return False, f"hf_qa_prompts_not_diverse: expected>={distinct_target} got={len(distinct_prompts)}"
+    if expected_min is not None and qa_anchor_target > 0 and len(matched_anchors) < int(qa_anchor_target):
+        return False, f"hf_qa_prompts_not_anchored: expected>={qa_anchor_target} got={len(matched_anchors)}"
     return True, "ok"
 
 

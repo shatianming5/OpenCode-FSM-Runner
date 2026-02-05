@@ -77,3 +77,41 @@ def test_validate_rollout_samples_enforces_hf_qa_prompt_diversity(tmp_path: Path
     assert ok is False
     assert "hf_qa_prompts_not_diverse" in reason
 
+
+def test_validate_rollout_samples_enforces_hf_qa_prompt_anchoring(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _write(repo / "data" / "hf_manifest.json", "{}\n")
+
+    table = pa.table(
+        {
+            "question": [
+                "A long and unique question one?",
+                "A long and unique question two?",
+                "A long and unique question three?",
+            ],
+            "answer": ["a1", "a2", "a3"],
+        }
+    )
+    parquet_path = repo / "main" / "test-00000-of-00001.parquet"
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, parquet_path)
+
+    samples_path = repo / "samples.jsonl"
+    _write(
+        samples_path,
+        "\n".join(
+            [
+                json.dumps({"prompt": "p1 unrelated", "completion": "c1", "reward": 1.0}),
+                json.dumps({"prompt": "p2 unrelated", "completion": "c2", "reward": 0.0}),
+                json.dumps({"prompt": "p3 unrelated", "completion": "c3", "reward": 0.0}),
+                "",
+            ]
+        ),
+    )
+
+    rollout = {"paths": {"samples_jsonl": str(samples_path.resolve())}}
+    _write(repo / ".aider_fsm" / "rollout.json", json.dumps(rollout) + "\n")
+
+    ok, reason = _validate_rollout_samples(repo, None, mode="full", eval_limit=3)
+    assert ok is False
+    assert "hf_qa_prompts_not_anchored" in reason
