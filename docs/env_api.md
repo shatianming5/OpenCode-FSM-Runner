@@ -130,6 +130,11 @@ Offline preference (optional):
 - Set `AIDER_FSM_PREFER_OFFLINE_HINTS=1` to prefer commands that can run without remote inference (e.g. `--samples ...`),
   and de-prioritize `--backend openai` hints.
 
+Timeout overrides (optional):
+
+- `AIDER_FSM_MAX_CMD_SECONDS=<int>`: override `pipeline.security.max_cmd_seconds` **at runtime** (useful for long-running “full” evals).
+- `AIDER_FSM_MAX_TOTAL_SECONDS=<int>`: override `pipeline.security.max_total_seconds` at runtime.
+
 ---
 
 ## Verification suite (single file)
@@ -153,6 +158,7 @@ python3 examples/verify_suite_single_file.py \
   --env AIDER_EVAL_LIMIT=1319 \
   --env AIDER_FSM_PREFER_OFFLINE_HINTS=1 \
   --env AIDER_FSM_HINT_TIMEOUT_SECONDS=7200 \
+  --env AIDER_FSM_MAX_CMD_SECONDS=14400 \
   --env AIDER_FSM_HINT_MAX_ATTEMPTS=1
 ```
 

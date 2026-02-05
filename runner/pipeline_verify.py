@@ -5,6 +5,7 @@ import os
 import shlex
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -348,6 +349,52 @@ def run_pipeline_verification(
     parts = [p for p in existing_pp.split(os.pathsep) if p]
     if str(runner_root) not in parts:
         env_base["PYTHONPATH"] = str(runner_root) + (os.pathsep + existing_pp if existing_pp else "")
+
+    # Generic timeout overrides (no benchmark-specific logic).
+    #
+    # Why: Some "full" evaluations (doc-hinted commands) can legitimately take >2h.
+    # Let callers extend caps without editing the repo-owned `pipeline.yml` contract.
+    #
+    # Sources: allow both the *base* environment and per-stage env injections (env_overrides)
+    # since programmatic callers often pass overrides via `pipeline.*_env`.
+    def _env_get(name: str) -> str | None:
+        v = env_base.get(name)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        if pipeline is None:
+            return None
+        for m in (
+            pipeline.auth_env,
+            pipeline.tests_env,
+            pipeline.deploy_env,
+            pipeline.rollout_env,
+            pipeline.evaluation_env,
+            pipeline.benchmark_env,
+        ):
+            vv = m.get(name) if isinstance(m, dict) else None
+            if isinstance(vv, str) and vv.strip():
+                return vv.strip()
+        return None
+
+    def _env_int(name: str) -> int | None:
+        raw = _env_get(name)
+        if raw is None:
+            return None
+        try:
+            n = int(str(raw).strip())
+        except Exception:
+            return None
+        return n if n > 0 else None
+
+    if pipeline is not None:
+        max_cmd = _env_int("AIDER_FSM_MAX_CMD_SECONDS")
+        max_total = _env_int("AIDER_FSM_MAX_TOTAL_SECONDS")
+        if max_cmd is not None or max_total is not None:
+            pipeline = replace(
+                pipeline,
+                security_max_cmd_seconds=max_cmd if max_cmd is not None else pipeline.security_max_cmd_seconds,
+                security_max_total_seconds=max_total if max_total is not None else pipeline.security_max_total_seconds,
+            )
 
     def _workdir_or_fail(stage: str, raw: str | None) -> tuple[Path, StageResult | None]:
         """中文说明：

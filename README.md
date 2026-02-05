@@ -212,3 +212,14 @@ python3 examples/verify_suite_single_file.py \
   --llm deepseek-v3.2 \
   --eval-mode full
 ```
+
+If a “full” evaluation command legitimately takes a long time, raise caps via env injection:
+
+```bash
+python3 examples/verify_suite_single_file.py \
+  --targets https://github.com/evalplus/evalplus \
+  --llm deepseek-v3.2 \
+  --eval-mode full \
+  --env AIDER_FSM_MAX_CMD_SECONDS=14400 \
+  --env AIDER_FSM_HINT_TIMEOUT_SECONDS=14400
+```

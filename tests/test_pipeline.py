@@ -345,3 +345,38 @@ def test_run_pipeline_verification_rollout_runs(tmp_path: Path):
     assert verify.ok is True
     assert verify.rollout is not None
     assert verify.rollout.ok is True
+
+
+def test_run_pipeline_verification_env_override_extends_max_cmd_seconds(tmp_path: Path):
+    """Env var override should allow extending security.max_cmd_seconds without editing pipeline.yml."""
+    sleep_cmd = _py_inline("import time; time.sleep(2)")
+
+    # Baseline: 1s cap should time out a 2s command.
+    pipeline = PipelineSpec(security_max_cmd_seconds=1, evaluation_run_cmds=[sleep_cmd])
+    verify = run_pipeline_verification(
+        tmp_path,
+        pipeline=pipeline,
+        tests_cmds=[_py_cmd(0)],
+        artifacts_dir=tmp_path / "artifacts_baseline",
+    )
+    assert verify.ok is False
+    assert verify.failed_stage == "evaluation"
+    assert verify.evaluation is not None
+    assert verify.evaluation.ok is False
+
+    # Override: extend cap to 5s via stage env injection (common in programmatic calls).
+    pipeline2 = PipelineSpec(
+        security_max_cmd_seconds=1,
+        evaluation_run_cmds=[sleep_cmd],
+        evaluation_env={"AIDER_FSM_MAX_CMD_SECONDS": "5"},
+    )
+    verify2 = run_pipeline_verification(
+        tmp_path,
+        pipeline=pipeline2,
+        tests_cmds=[_py_cmd(0)],
+        artifacts_dir=tmp_path / "artifacts_override",
+    )
+    assert verify2.ok is True
+    assert verify2.failed_stage is None
+    assert verify2.evaluation is not None
+    assert verify2.evaluation.ok is True
