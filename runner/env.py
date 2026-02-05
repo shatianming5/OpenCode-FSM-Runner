@@ -415,6 +415,7 @@ class EnvSession:
         for attempt in range(int(max(0, repair_iters)) + 1):
             deploy_dir = (run_root / f"deploy_attempt_{attempt+1:02d}").resolve()
             rollout_dir = (run_root / f"rollout_attempt_{attempt+1:02d}").resolve()
+            contract_err = ""
             overrides = self._base_overrides(mode=mode, extra=env_overrides)
             self._apply_llm_overrides(overrides)
 
@@ -471,6 +472,7 @@ class EnvSession:
                         (rollout_dir / "rollout_contract_error.txt").write_text(str(reason) + "\n", encoding="utf-8")
                     except Exception:
                         pass
+                    contract_err = str(reason)
                     rollout_res = RolloutCallResult(
                         ok=False,
                         artifacts_dir=rollout_res.artifacts_dir,
@@ -495,7 +497,7 @@ class EnvSession:
                 deploy_artifacts_dir=deploy_dir,
                 rollout_eval_artifacts_dir=rollout_dir,
                 command_hints=self.command_hints,
-                extra_context=("rollout_contract_invalid: missing_samples_jsonl" if require_samples else ""),
+                extra_context=(contract_err or ("rollout_contract_invalid" if require_samples else "")),
                 timeout_seconds=int(self.opencode_timeout_seconds or 300),
             )
 
@@ -767,6 +769,7 @@ class EnvSession:
                         (roll_eval_dir / "rollout_contract_error.txt").write_text(str(reason) + "\n", encoding="utf-8")
                     except Exception:
                         pass
+                    combined = (combined + "\n" + str(reason)).strip() if combined else str(reason)
                     rollout_res = RolloutCallResult(
                         ok=False,
                         artifacts_dir=rollout_res.artifacts_dir,
@@ -793,7 +796,7 @@ class EnvSession:
                 command_hints=self.command_hints,
                 extra_context=(
                     combined
-                    or ("rollout_contract_invalid: missing_samples_jsonl" if (require_samples and not rollout_res.ok) else "")
+                    or ("rollout_contract_invalid" if (require_samples and not rollout_res.ok) else "")
                 ),
                 timeout_seconds=int(self.opencode_timeout_seconds or 300),
             )
