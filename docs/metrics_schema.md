@@ -7,7 +7,9 @@ To make results comparable across repos (evaluation + rollout + post-training), 
 ## File(s)
 
 - `evaluation.metrics_path` or `benchmark.metrics_path` (required if you want metrics validation)
-- Optional rollout artifact: `.aider_fsm/rollout.json`
+- Rollout artifacts (recommended for post-training RL):
+  - `.aider_fsm/rollout.json`
+  - `rollout.json.paths.samples_jsonl` → JSONL samples file under `$AIDER_FSM_ARTIFACTS_DIR`
 
 ## Minimal metrics JSON
 
@@ -27,11 +29,25 @@ Recommended minimum:
 
 ### Rollout (post-training RL)
 
-- `rollout.ok`: boolean
-- `rollout.n_episodes`: integer
-- `rollout.success_rate`: number in `[0, 1]`
-- `rollout.failures_by_type`: object mapping failure type -> count
-- `rollout.avg_latency_ms`: number (optional)
+At minimum, rollout should produce:
+
+- `.aider_fsm/rollout.json` (JSON object) with:
+  - `ok`: boolean
+  - `paths.samples_jsonl`: string path to a JSONL file
+
+Samples JSONL schema (one JSON object per line; benchmark-agnostic):
+
+- `prompt`: string
+- `completion`: string
+- `reward`: number
+- `meta`: object (optional)
+
+Additional recommended rollout keys (optional):
+
+- `n_episodes`: integer
+- `success_rate`: number in `[0, 1]`
+- `failures_by_type`: object mapping failure type -> count
+- `avg_latency_ms`: number
 
 ### Training (post-training)
 

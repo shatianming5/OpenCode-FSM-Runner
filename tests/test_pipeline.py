@@ -18,6 +18,11 @@ def _py_cmd(exit_code: int) -> str:
     return f'{py} -c "import sys; sys.exit({exit_code})"'
 
 
+def _py_inline(code: str) -> str:
+    py = shlex.quote(sys.executable)
+    return f"{py} -c {shlex.quote(code)}"
+
+
 def test_load_pipeline_spec_ok(tmp_path: Path):
     """中文说明：
     - 含义：验证 `load_pipeline_spec` 能解析较完整的 v1 pipeline.yml。
@@ -240,6 +245,65 @@ def test_run_pipeline_verification_required_ok_enforces_true(tmp_path: Path):
     assert verify.ok is False
     assert verify.failed_stage == "metrics"
     assert any("ok_not_true" in e for e in (verify.metrics_errors or []))
+
+
+def test_run_pipeline_verification_require_hints_used_missing_fails(tmp_path: Path):
+    """When hint execution is required, missing hints_used.json must fail verification."""
+    eval_cmd = _py_inline(
+        "import json, pathlib; "
+        "pathlib.Path('.aider_fsm').mkdir(parents=True, exist_ok=True); "
+        "pathlib.Path('metrics.json').write_text(json.dumps({'ok': True, 'score': 1}) + '\\n')"
+    )
+    pipeline = PipelineSpec(
+        evaluation_run_cmds=[eval_cmd],
+        evaluation_metrics_path="metrics.json",
+        evaluation_required_keys=["score", "ok"],
+        evaluation_env={
+            "AIDER_FSM_REQUIRE_HINTS": "1",
+            "AIDER_FSM_HINT_ANCHORS_JSON": '["pytest"]',
+        },
+    )
+    verify = run_pipeline_verification(
+        tmp_path,
+        pipeline=pipeline,
+        tests_cmds=[_py_cmd(0)],
+        artifacts_dir=tmp_path / "artifacts",
+    )
+    assert verify.ok is False
+    assert verify.failed_stage == "evaluation"
+    assert verify.evaluation is not None
+    assert verify.evaluation.ok is True
+    assert any("evaluation.hints_requirement_failed" in e for e in (verify.metrics_errors or []))
+
+
+def test_run_pipeline_verification_require_hints_used_ok_passes(tmp_path: Path):
+    """When hint execution is required, a valid hints_used.json should allow verification to pass."""
+    eval_cmd = _py_inline(
+        "import json, pathlib; "
+        "pathlib.Path('.aider_fsm').mkdir(parents=True, exist_ok=True); "
+        "pathlib.Path('.aider_fsm/hints_used.json').write_text(json.dumps({"
+        "'ok': True, 'used_anchors': ['pytest'], 'commands': ['pytest -q']"
+        "}) + '\\n'); "
+        "pathlib.Path('metrics.json').write_text(json.dumps({'ok': True, 'score': 1}) + '\\n')"
+    )
+    pipeline = PipelineSpec(
+        evaluation_run_cmds=[eval_cmd],
+        evaluation_metrics_path="metrics.json",
+        evaluation_required_keys=["score", "ok"],
+        evaluation_env={
+            "AIDER_FSM_REQUIRE_HINTS": "1",
+            "AIDER_FSM_HINT_ANCHORS_JSON": '["pytest"]',
+        },
+    )
+    verify = run_pipeline_verification(
+        tmp_path,
+        pipeline=pipeline,
+        tests_cmds=[_py_cmd(0)],
+        artifacts_dir=tmp_path / "artifacts",
+    )
+    assert verify.ok is True
+    assert verify.failed_stage is None
+    assert verify.metrics == {"ok": True, "score": 1}
 
 
 def test_run_pipeline_verification_safe_mode_blocks_sudo(tmp_path: Path):

@@ -15,7 +15,7 @@ def test_suggest_contract_hints_from_readme_code_fence(tmp_path: Path) -> None:
                 "",
                 "Run evaluation:",
                 "```bash",
-                "python -m evalplus.evaluate --dataset humanevalplus --model openai",
+                "python -m benchtool.evaluate --dataset demo --model openai",
                 "```",
                 "",
             ]
@@ -24,8 +24,7 @@ def test_suggest_contract_hints_from_readme_code_fence(tmp_path: Path) -> None:
     )
 
     hints = suggest_contract_hints(repo)
-    assert "python -m evalplus.evaluate --dataset humanevalplus --model openai" in hints.commands
+    assert "python -m benchtool.evaluate --dataset demo --model openai" in hints.commands
     # Anchors should contain the module and its top-level package to make audits robust.
-    assert "evalplus.evaluate" in hints.anchors
-    assert "evalplus" in hints.anchors
-
+    assert "benchtool.evaluate" in hints.anchors
+    assert "benchtool" in hints.anchors

@@ -68,6 +68,10 @@ See `examples/pipeline.example.yml` and `examples/pipeline.benchmark_skeleton.ym
 Convention:
 
 - If `required_keys` includes `ok`, the runner additionally requires `metrics.ok === true` (to avoid “placeholder success” metrics).
+- If `AIDER_FSM_REQUIRE_HINTS=1`, the runner additionally requires `.aider_fsm/hints_used.json` after evaluation:
+  - must be a JSON object with `ok: true` and a non-empty `used_anchors` list
+  - if `AIDER_FSM_HINT_ANCHORS_JSON` is provided (JSON array), `used_anchors` must include at least one of those tokens
+  - if no hinted/official command can run, write `ok: false` + a clear `reason` and exit non-zero
 
 ## `benchmark` (optional)
 

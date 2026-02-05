@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -177,6 +178,25 @@ def run(config: RunnerConfig, *, agent: AgentClient | None = None) -> int:
     os.environ["AIDER_FSM_REPO_ROOT"] = str(repo.resolve())
     os.environ["AIDER_FSM_RUN_ID"] = str(run_id)
     os.environ["AIDER_FSM_ARTIFACTS_BASE"] = str(config.artifacts_base.resolve())
+
+    # Contract guardrail: if repo docs contain runnable evaluation hints, require the contract
+    # to execute at least one hinted/official command and record usage (or fail with ok=false).
+    hints = suggest_contract_hints(repo)
+    if hints.commands:
+        os.environ.setdefault("AIDER_FSM_REQUIRE_HINTS", "1")
+        try:
+            os.environ.setdefault("AIDER_FSM_HINTS_JSON", json.dumps(list(hints.commands[:20]), ensure_ascii=False))
+        except Exception:
+            os.environ.setdefault("AIDER_FSM_HINTS_JSON", "[]")
+        try:
+            os.environ.setdefault("AIDER_FSM_HINT_ANCHORS_JSON", json.dumps(list(hints.anchors[:20]), ensure_ascii=False))
+        except Exception:
+            os.environ.setdefault("AIDER_FSM_HINT_ANCHORS_JSON", "[]")
+        try:
+            write_text(artifacts_run_dir / "command_hints.txt", "\n".join(hints.commands) + "\n")
+            write_text(artifacts_run_dir / "command_hint_anchors.txt", "\n".join(hints.anchors) + "\n")
+        except Exception:
+            pass
     bootstrap_path = (repo / ".aider_fsm" / "bootstrap.yml").resolve()
 
     # If the repo does not provide a pipeline contract, optionally scaffold a minimal one.

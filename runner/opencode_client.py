@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import signal
 import secrets
 import shutil
 import socket
@@ -210,8 +211,16 @@ class OpenCodeClient(AgentClient):
                 repo=repo, server_log_path=server_log_path, username=username
             )
 
-        self._wait_for_health()
-        self._session_id = self._create_session(title=session_title or f"runner:{repo.name}")
+        try:
+            self._wait_for_health()
+            self._session_id = self._create_session(title=session_title or f"runner:{repo.name}")
+        except Exception:
+            # If init fails after starting a local server, ensure we don't leak the process.
+            try:
+                self.close()
+            except Exception:
+                pass
+            raise
 
     def close(self) -> None:
         """中文说明：
@@ -229,11 +238,26 @@ class OpenCodeClient(AgentClient):
                     pass
         finally:
             if self._proc is not None:
-                self._proc.terminate()
                 try:
-                    self._proc.wait(timeout=5)
+                    if os.name == "posix":
+                        try:
+                            os.killpg(os.getpgid(self._proc.pid), signal.SIGTERM)
+                        except Exception:
+                            self._proc.terminate()
+                    else:  # pragma: no cover
+                        self._proc.terminate()
+                    try:
+                        self._proc.wait(timeout=5)
+                    except Exception:
+                        if os.name == "posix":
+                            try:
+                                os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
+                            except Exception:
+                                self._proc.kill()
+                        else:  # pragma: no cover
+                            self._proc.kill()
                 except Exception:
-                    self._proc.kill()
+                    pass
             if self._server_log_file is not None:
                 try:
                     self._server_log_file.close()
@@ -328,6 +352,7 @@ class OpenCodeClient(AgentClient):
             stdin=subprocess.DEVNULL,
             stdout=stdout,
             stderr=stdout,
+            start_new_session=True,
         )
         return OpenCodeServerConfig(base_url=f"http://{host}:{port}", username=user, password=pwd)
 
@@ -337,7 +362,7 @@ class OpenCodeClient(AgentClient):
         - 内容：轮询 `/global/health` 最多约 20 秒；失败则抛错并包含最近一次错误尾部。
         - 可简略：可能（轮询参数可配置；但保留健康检查可避免后续难以理解的失败）。
         """
-        deadline = time.time() + 20
+        deadline = time.time() + 60
         last_err = ""
         while time.time() < deadline:
             try:

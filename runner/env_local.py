@@ -176,6 +176,44 @@ def _ensure_contract_stage_skeleton(repo_root: Path) -> None:
         "set -Eeuo pipefail\n"
         "mkdir -p .aider_fsm\n"
         "RUNTIME_ENV_JSON=\"${AIDER_RUNTIME_ENV_PATH:-.aider_fsm/runtime_env.json}\"\n"
+        "\n"
+        "if [ \"${AIDER_LLM_KIND:-local_hf}\" = \"remote\" ]; then\n"
+        "  if [ -z \"${AIDER_LLM_MODEL:-}\" ]; then\n"
+        "    \"$AIDER_FSM_PYTHON\" - <<'PY' > \"$RUNTIME_ENV_JSON\"\n"
+        "import json, os, time\n"
+        "base = os.getenv('OPENAI_API_BASE') or os.getenv('OPENAI_BASE_URL') or ''\n"
+        "model = os.getenv('AIDER_LLM_MODEL') or os.getenv('OPENAI_MODEL') or ''\n"
+        "obj = {\n"
+        "  'ts': time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime()),\n"
+        "  'run_id': os.getenv('AIDER_FSM_RUN_ID',''),\n"
+        "  'service': {},\n"
+        "  'inference': {'type': 'openai_compat', 'openai_base_url': base, 'model': model},\n"
+        "  'paths': {'rollout_path': '.aider_fsm/rollout.json', 'metrics_path': '.aider_fsm/metrics.json'},\n"
+        "  'ok': False,\n"
+        "  'reason': 'AIDER_LLM_MODEL is not set',\n"
+        "}\n"
+        "print(json.dumps(obj, ensure_ascii=False, indent=2))\n"
+        "PY\n"
+        "    exit 2\n"
+        "  fi\n"
+        "  \"$AIDER_FSM_PYTHON\" - <<'PY' > \"$RUNTIME_ENV_JSON\"\n"
+        "import json, os, time\n"
+        "base = os.getenv('OPENAI_API_BASE') or os.getenv('OPENAI_BASE_URL') or ''\n"
+        "model = os.getenv('AIDER_LLM_MODEL') or os.getenv('OPENAI_MODEL') or ''\n"
+        "obj = {\n"
+        "  'ts': time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime()),\n"
+        "  'run_id': os.getenv('AIDER_FSM_RUN_ID',''),\n"
+        "  'service': {},\n"
+        "  'inference': {'type': 'openai_compat', 'openai_base_url': base, 'model': model},\n"
+        "  'paths': {'rollout_path': '.aider_fsm/rollout.json', 'metrics_path': '.aider_fsm/metrics.json'},\n"
+        "  'ok': True,\n"
+        "}\n"
+        "print(json.dumps(obj, ensure_ascii=False, indent=2))\n"
+        "PY\n"
+        "  echo \"Wrote $RUNTIME_ENV_JSON\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "\n"
         "if [ -z \"${AIDER_TRAINED_MODEL_DIR:-}\" ]; then\n"
         "  \"$AIDER_FSM_PYTHON\" - <<'PY' > \"$RUNTIME_ENV_JSON\"\n"
         "import json, os, time\n"
@@ -235,16 +273,7 @@ def _ensure_contract_stage_skeleton(repo_root: Path) -> None:
         "#!/usr/bin/env bash\n"
         "set -Eeuo pipefail\n"
         "mkdir -p .aider_fsm\n"
-        "\"$AIDER_FSM_PYTHON\" - <<'PY' > .aider_fsm/rollout.json\n"
-        "import json, os, time\n"
-        "obj = {\n"
-        "  'ts': time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime()),\n"
-        "  'ok': True,\n"
-        "  'mode': os.getenv('AIDER_EVAL_MODE',''),\n"
-        "  'notes': 'no-op rollout (scaffold skeleton)',\n"
-        "}\n"
-        "print(json.dumps(obj, ensure_ascii=False, indent=2))\n"
-        "PY\n"
+        "\"$AIDER_FSM_PYTHON\" -m runner.generic_rollout\n"
         "echo \"Wrote .aider_fsm/rollout.json\"\n",
     )
     _write_if_missing(
@@ -252,18 +281,7 @@ def _ensure_contract_stage_skeleton(repo_root: Path) -> None:
         "#!/usr/bin/env bash\n"
         "set -Eeuo pipefail\n"
         "mkdir -p .aider_fsm\n"
-        "\"$AIDER_FSM_PYTHON\" - <<'PY' > .aider_fsm/metrics.json\n"
-        "import json, time\n"
-        "obj = {\n"
-        "  'ts': time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime()),\n"
-        "  'ok': False,\n"
-        "  'score': 0.0,\n"
-        "  'reason': 'evaluation not implemented (scaffold skeleton)',\n"
-        "}\n"
-        "print(json.dumps(obj, ensure_ascii=False, indent=2))\n"
-        "PY\n"
-        "echo \"Wrote .aider_fsm/metrics.json\"\n"
-        "exit 2\n",
+        "\"$AIDER_FSM_PYTHON\" -m runner.generic_evaluation\n",
     )
     _write_if_missing(
         ".aider_fsm/stages/benchmark.sh",
@@ -287,8 +305,8 @@ def _write_fallback_pipeline_yml(repo_root: Path, *, pipeline_rel: str, require_
                 "version: 1",
                 "security:",
                 "  mode: safe",
-                "  max_cmd_seconds: 120",
-                "  max_total_seconds: 600",
+                "  max_cmd_seconds: 7200",
+                "  max_total_seconds: 86400",
                 "tests:",
                 "  cmds:",
                 "    - bash .aider_fsm/stages/tests.sh",
@@ -336,6 +354,8 @@ def open_env(
     scaffold_opencode_bash: str = "full",
     unattended: str = "strict",
     artifacts_dir: Path | None = None,
+    seed_stage_skeleton: bool = True,
+    write_fallback_pipeline_yml: bool = True,
     agent: AgentClient | None = None,
 ) -> EnvHandle:
     """中文说明：
@@ -360,8 +380,9 @@ def open_env(
             created_agent = False
             scaffold_err = ""
             try:
-                # Provide a robust starting point to reduce common scaffolding failures.
-                _ensure_contract_stage_skeleton(repo_root)
+                if bool(seed_stage_skeleton):
+                    # Provide a robust starting point to reduce common scaffolding failures.
+                    _ensure_contract_stage_skeleton(repo_root)
                 if agent is None:
                     created_agent = True
                     agent = OpenCodeClient(
@@ -412,17 +433,18 @@ def open_env(
                         pass
 
             if not pipeline_path.exists():
-                # Fallback: write a minimal pipeline.yml ourselves so downstream repair can proceed.
-                # This keeps the behavior generic and avoids hard-failing when a model forgets tool calls.
-                try:
-                    _write_fallback_pipeline_yml(
-                        repo_root,
-                        pipeline_rel=str(pipeline_rel).strip() or "pipeline.yml",
-                        require_metrics=bool(scaffold_require_metrics),
-                    )
-                    write_text(out_dir / "scaffold_fallback_used.txt", "wrote_fallback_pipeline_yml\n")
-                except Exception:
-                    pass
+                if bool(write_fallback_pipeline_yml):
+                    # Fallback: write a minimal pipeline.yml ourselves so downstream repair can proceed.
+                    # This keeps the behavior generic and avoids hard-failing when a model forgets tool calls.
+                    try:
+                        _write_fallback_pipeline_yml(
+                            repo_root,
+                            pipeline_rel=str(pipeline_rel).strip() or "pipeline.yml",
+                            require_metrics=bool(scaffold_require_metrics),
+                        )
+                        write_text(out_dir / "scaffold_fallback_used.txt", "wrote_fallback_pipeline_yml\n")
+                    except Exception:
+                        pass
             if not pipeline_path.exists():
                 write_text(out_dir / "scaffold_error.txt", "scaffold_contract_failed: missing_pipeline_yml\n")
                 raise RuntimeError(

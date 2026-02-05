@@ -4,6 +4,7 @@ import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,147 @@ def _iter_md_paths(repo: Path, *, max_files: int) -> list[Path]:
     return md_paths[: int(max(1, max_files))]
 
 
+def _iter_workflow_paths(repo: Path, *, max_files: int) -> list[Path]:
+    repo = Path(repo).resolve()
+    wf_root = (repo / ".github" / "workflows").resolve()
+    if not wf_root.exists():
+        return []
+    paths: list[Path] = []
+    for pat in ("*.yml", "*.yaml"):
+        paths.extend(sorted(wf_root.glob(pat)))
+    paths = [p for p in paths if p.is_file()]
+    return paths[: int(max(1, max_files))]
+
+
+def _yaml_safe_load(text: str) -> Any | None:
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return None
+    try:
+        return yaml.safe_load(text)
+    except Exception:
+        return None
+
+
+def _extract_workflow_run_scripts(text: str) -> list[str]:
+    """Extract `run:` scripts from GitHub Actions workflow YAML (best-effort)."""
+    data = _yaml_safe_load(text)
+    if not isinstance(data, dict):
+        return []
+    jobs = data.get("jobs")
+    if not isinstance(jobs, dict):
+        return []
+
+    scripts: list[str] = []
+    for _job_id, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        steps = job.get("steps")
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            run = step.get("run")
+            if not isinstance(run, str):
+                continue
+            s = run.strip()
+            if s:
+                scripts.append(s)
+    return scripts
+
+
+def _split_script_lines(script: str) -> list[str]:
+    """Normalize a script block into non-empty lines (keep `\\` continuations)."""
+    out: list[str] = []
+    for raw in str(script or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        out.append(line)
+    return out
+
+
+def _join_with_continuations(lines: list[str]) -> list[str]:
+    """Join lines that use `\\` continuation into single commands."""
+    out: list[str] = []
+    cur = ""
+    for line in lines:
+        if cur:
+            if cur.rstrip().endswith("\\"):
+                cur = cur.rstrip()[:-1].rstrip() + " " + line.lstrip()
+                continue
+            out.append(cur)
+            cur = ""
+        # Skip orphan option lines.
+        if line.startswith("-"):
+            continue
+        cur = line
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _extract_workflow_candidates(
+    repo: Path,
+    *,
+    interest_re: re.Pattern[str],
+    max_files: int,
+    max_candidates: int,
+) -> list[str]:
+    """Best-effort: extract runnable-ish command scripts from CI workflows.
+
+    Strategy:
+    - Parse `.github/workflows/*.yml(yaml)` and collect step `run:` scripts.
+    - When an "interesting" evaluation command is found (pytest/eval/benchmark/...),
+      also prepend a small prelude of preceding run steps (up to 3). This captures
+      common setup (e.g., `docker build` before `docker run ... pytest`).
+    """
+    repo = Path(repo).resolve()
+    out: list[str] = []
+    seen: set[str] = set()
+
+    wf_paths = _iter_workflow_paths(repo, max_files=max_files)
+    for p in wf_paths:
+        if len(out) >= int(max(1, max_candidates)):
+            break
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+        scripts = _extract_workflow_run_scripts(text)
+        if not scripts:
+            continue
+
+        step_cmds: list[str] = []
+        for s in scripts:
+            lines = _split_script_lines(s)
+            joined = _join_with_continuations(lines)
+            if len(joined) >= 2:
+                step_cmds.append("\n".join(joined))
+            elif joined:
+                step_cmds.append(joined[0])
+
+        for idx, cmd in enumerate(step_cmds):
+            if len(out) >= int(max(1, max_candidates)):
+                break
+            if not interest_re.search(cmd):
+                continue
+            prelude = [c for c in step_cmds[max(0, idx - 3) : idx] if c.strip()]
+            combined = ("\n".join(prelude + [cmd])).strip()
+            for item in (combined, cmd.strip()):
+                if not item or item in seen:
+                    continue
+                seen.add(item)
+                out.append(item)
+                if len(out) >= int(max(1, max_candidates)):
+                    break
+
+    return out
+
+
 def _tokenize_hint(cmd: str) -> list[str]:
     try:
         return shlex.split(cmd)
@@ -43,6 +185,8 @@ def _extract_anchors(hints: list[str]) -> list[str]:
         "bash",
         "sh",
         "zsh",
+        "import",
+        "from",
         "python",
         "python3",
         "pip",
@@ -140,10 +284,9 @@ def suggest_contract_hints(repo: Path, *, max_files: int = 8, max_candidates: in
 
     interest_re = re.compile(
         r"(?i)("
-        r"\\beval\\b|"
+        r"\beval\b|"
         r"evaluate|evaluation|"
-        r"benchmark|leaderboard|quick\\s+start|"
-        r"evalplus|lm_eval|miniwob|"
+        r"benchmark|leaderboard|quick\s+start|"
         r"pytest|inspect"
         r")"
     )
@@ -197,6 +340,23 @@ def suggest_contract_hints(repo: Path, *, max_files: int = 8, max_candidates: in
                 if len(candidates) >= int(max(1, max_candidates)):
                     anchors = _extract_anchors(candidates)
                     return ContractHints(commands=candidates, anchors=anchors)
+
+    # Fall back to CI workflow hints when README/docs are insufficient.
+    if len(candidates) < int(max(1, max_candidates)):
+        wf_candidates = _extract_workflow_candidates(
+            Path(repo),
+            interest_re=interest_re,
+            max_files=max_files,
+            max_candidates=int(max(0, int(max_candidates) - len(candidates))),
+        )
+        for cmd in wf_candidates:
+            if cmd in seen:
+                continue
+            seen.add(cmd)
+            candidates.append(cmd)
+            if len(candidates) >= int(max(1, max_candidates)):
+                anchors = _extract_anchors(candidates)
+                return ContractHints(commands=candidates, anchors=anchors)
 
     anchors = _extract_anchors(candidates)
     return ContractHints(commands=candidates, anchors=anchors)

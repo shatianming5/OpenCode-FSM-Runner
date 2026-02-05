@@ -3,16 +3,20 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
 import sys
 import time
 from pathlib import Path
 
 from .contract_hints import suggest_contract_hints
+from .contract_repair import repair_contract
 from .dotenv import load_dotenv
+from .eval_audit import (
+    audit_eval_script_for_hardcoded_nonzero_score,
+    audit_eval_script_has_real_execution,
+    audit_eval_script_mentions_any_anchor,
+)
 from .env_local import deploy, deploy_teardown, open_env, rollout_and_evaluate, with_runtime_env_path
-from .opencode_client import OpenCodeClient
 from .subprocess_utils import tail
 
 
@@ -68,13 +72,6 @@ def _patch_runtime_env_model_dir(runtime_env_path: Path, trained_model_dir: str)
     _write_json_object(p, obj)
 
 
-def _read_text_tail(path: Path, *, n: int) -> str:
-    try:
-        return tail(path.read_text(encoding="utf-8", errors="replace"), n)
-    except Exception:
-        return ""
-
-
 def _snapshot_contract_files(repo: Path, out_dir: Path) -> None:
     """Snapshot contract files for audit/debug (best-effort)."""
     try:
@@ -91,157 +88,6 @@ def _snapshot_contract_files(repo: Path, out_dir: Path) -> None:
     except Exception:
         return
 
-
-def _audit_eval_script_for_hardcoded_nonzero_score(repo: Path) -> str | None:
-    """Best-effort heuristic to catch obvious fake metrics.
-
-    We cannot fully prove "real benchmark execution", but we can block the most
-    common failure mode: writing a constant non-zero score into metrics.json.
-    """
-    p = (repo / ".aider_fsm" / "stages" / "evaluation.sh").resolve()
-    if not p.exists():
-        return None
-    try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception as e:
-        return f"failed_to_read_evaluation_sh: {e}"
-
-    # Matches non-zero numbers like 0.92, 1, 2.5, etc. (but not 0 / 0.0 / 0.00).
-    nonzero = r"(?:0\\.[0-9]*[1-9][0-9]*|[1-9][0-9]*(?:\\.[0-9]+)?)"
-    patterns = [
-        re.compile(rf"\\bSCORE\\s*=\\s*['\\\"]?{nonzero}['\\\"]?\\b", re.IGNORECASE),
-        re.compile(rf"\\bscore\\s*=\\s*{nonzero}\\b", re.IGNORECASE),
-        re.compile(rf"\"score\"\\s*:\\s*{nonzero}\\b", re.IGNORECASE),
-    ]
-    bad: list[str] = []
-    for i, line in enumerate(text.splitlines(), start=1):
-        l = line.strip()
-        if not l or l.startswith("#"):
-            continue
-        if any(pat.search(line) for pat in patterns):
-            bad.append(f"{i}: {l}")
-        if len(bad) >= 30:
-            break
-    if not bad:
-        return None
-    return "hardcoded_nonzero_score_in_.aider_fsm/stages/evaluation.sh:\n" + "\n".join(bad)
-
-
-def _audit_eval_script_has_real_execution(repo: Path, *, extra_markers: list[str] | None = None) -> str | None:
-    """Heuristic: evaluation.sh should *run* something beyond writing JSON.
-
-    We keep this benchmark-agnostic by only checking for common "execution markers"
-    rather than benchmark names.
-    """
-    p = (repo / ".aider_fsm" / "stages" / "evaluation.sh").resolve()
-    if not p.exists():
-        return None
-    try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return None
-
-    # Intentionally exclude generic "python" markers: writing JSON via python is not "real evaluation".
-    markers = [
-        "pytest",
-        "make ",
-        "npm ",
-        "node ",
-        "docker",
-        "inspect ",
-        "lm_eval",
-        "evalplus",
-        "load_dataset",
-    ]
-    markers.extend([m for m in (extra_markers or []) if str(m).strip()])
-    non_exec_prefixes = (
-        "echo",
-        "cat",
-        "printf",
-        "grep",
-        "rg",
-        "sed",
-        "awk",
-        "jq",
-        "head",
-        "tail",
-        "test",
-        "[",
-        "mkdir",
-        "date",
-        "true",
-        "false",
-        "cp",
-        "mv",
-        "rm",
-        "touch",
-    )
-    for raw in text.splitlines():
-        line = raw.strip().lower()
-        if not line or line.startswith("#"):
-            continue
-        first = line.split(maxsplit=1)[0] if line.split() else ""
-        if first in non_exec_prefixes:
-            continue
-        if any(m in line for m in markers):
-            return None
-    return "evaluation.sh does not appear to run any benchmark/evaluation command (no pytest/make/npm/node/docker/inspect/lm_eval/evalplus markers found)"
-
-
-def _audit_eval_script_mentions_any_anchor(repo: Path, anchors: list[str]) -> str | None:
-    """If we have doc-derived anchors, require evaluation.sh to reference at least one.
-
-    This keeps the check benchmark-agnostic while nudging contracts to follow the repo's
-    own recommended commands instead of proxy metrics.
-    """
-    anchors2 = [str(a).strip().lower() for a in (anchors or []) if str(a).strip()]
-    if not anchors2:
-        return None
-    p = (repo / ".aider_fsm" / "stages" / "evaluation.sh").resolve()
-    if not p.exists():
-        return None
-    try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return None
-
-    non_exec_prefixes = (
-        "echo",
-        "cat",
-        "printf",
-        "grep",
-        "rg",
-        "sed",
-        "awk",
-        "jq",
-        "head",
-        "tail",
-        "test",
-        "[",
-        "mkdir",
-        "date",
-        "true",
-        "false",
-        "cp",
-        "mv",
-        "rm",
-        "touch",
-        "export",
-    )
-    for raw in text.splitlines():
-        line = raw.strip().lower()
-        if not line or line.startswith("#"):
-            continue
-        first = line.split(maxsplit=1)[0] if line.split() else ""
-        if first in non_exec_prefixes:
-            continue
-        if re.match(r"^[a-z_][a-z0-9_]*=", first):
-            continue
-        if any(a in line for a in anchors2):
-            return None
-    return "evaluation.sh does not appear to use any doc-derived benchmark/eval command hint anchors (likely proxy evaluation)"
-
-
 def _repair_contract(
     *,
     repo: Path,
@@ -255,6 +101,19 @@ def _repair_contract(
     command_hints: list[str] | None = None,
     extra_context: str = "",
 ) -> None:
+    repair_contract(
+        repo=repo,
+        model=model,
+        opencode_url=opencode_url,
+        unattended=unattended,
+        artifacts_dir=artifacts_dir,
+        failed_stage=failed_stage,
+        deploy_artifacts_dir=deploy_artifacts_dir,
+        rollout_eval_artifacts_dir=rollout_eval_artifacts_dir,
+        command_hints=command_hints,
+        extra_context=extra_context,
+    )
+    return
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     oc_username = None
     oc_password = None
@@ -472,6 +331,16 @@ def main(argv: list[str] | None = None) -> int:
             (artifacts_dir / "command_hint_anchors.txt").write_text("\n".join(hints.anchors) + "\n", encoding="utf-8")
         except Exception:
             pass
+        # Enforce: evaluation must run at least one hinted/official command, otherwise ok=false and fail.
+        user_overrides.setdefault("AIDER_FSM_REQUIRE_HINTS", "1")
+        try:
+            user_overrides.setdefault("AIDER_FSM_HINTS_JSON", json.dumps(list(hints.commands[:20]), ensure_ascii=False))
+        except Exception:
+            user_overrides.setdefault("AIDER_FSM_HINTS_JSON", "[]")
+        try:
+            user_overrides.setdefault("AIDER_FSM_HINT_ANCHORS_JSON", json.dumps(list(hints.anchors[:20]), ensure_ascii=False))
+        except Exception:
+            user_overrides.setdefault("AIDER_FSM_HINT_ANCHORS_JSON", "[]")
 
     # Make run id available to stage scripts without requiring hardcoded derivations.
     user_overrides.setdefault("AIDER_FSM_RUN_ID", run_id)
@@ -566,9 +435,9 @@ def main(argv: list[str] | None = None) -> int:
             last_failed_stage = ""
             # Extra audit: reject obvious hardcoded constant scores even if the run "passes".
             if bool(args.require_metrics):
-                audit_issue = _audit_eval_script_for_hardcoded_nonzero_score(env.repo)
-                audit_issue2 = _audit_eval_script_has_real_execution(env.repo, extra_markers=hints.anchors)
-                audit_issue3 = _audit_eval_script_mentions_any_anchor(env.repo, hints.anchors)
+                audit_issue = audit_eval_script_for_hardcoded_nonzero_score(env.repo)
+                audit_issue2 = audit_eval_script_has_real_execution(env.repo, extra_markers=hints.anchors)
+                audit_issue3 = audit_eval_script_mentions_any_anchor(env.repo, hints.anchors)
                 combined = "\n\n".join([x for x in (audit_issue, audit_issue2, audit_issue3) if x])
                 if combined:
                     last_failed_stage = "evaluation"

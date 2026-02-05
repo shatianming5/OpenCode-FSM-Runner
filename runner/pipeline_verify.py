@@ -83,6 +83,63 @@ def _validate_metrics(metrics: dict[str, Any], required_keys: list[str]) -> list
     return missing
 
 
+def _is_truthy(value: str | None) -> bool:
+    v = str(value or "").strip().lower()
+    return v in ("1", "true", "yes", "y", "on")
+
+
+def _parse_json_str_list(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(str(raw))
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    out: list[str] = []
+    for x in data:
+        if not isinstance(x, str):
+            continue
+        s = x.strip()
+        if s:
+            out.append(s)
+    return out
+
+
+def _validate_hints_used(repo: Path, *, expected_anchors: list[str]) -> tuple[bool, str]:
+    """Validate `.aider_fsm/hints_used.json` when hint execution is required."""
+    repo = Path(repo).resolve()
+    path = (repo / ".aider_fsm" / "hints_used.json").resolve()
+    if not path.exists():
+        return False, f"missing_hints_used_json: {path}"
+    data, err = _read_json(path)
+    if err:
+        return False, f"hints_used_json_{err}"
+    assert isinstance(data, dict)  # _read_json guarantees dict on success
+    if data.get("ok") is not True:
+        return False, "hints_used.ok_not_true"
+
+    used = data.get("used_anchors")
+    if not isinstance(used, list) or not used:
+        return False, "hints_used.used_anchors_missing_or_empty"
+    used_clean = [str(x).strip() for x in used if isinstance(x, str) and str(x).strip()]
+    if not used_clean:
+        return False, "hints_used.used_anchors_invalid"
+
+    exp = [str(x).strip() for x in (expected_anchors or []) if str(x).strip()]
+    if exp:
+        if not any(u in exp for u in used_clean):
+            return False, "hints_used.no_expected_anchor"
+
+    commands = data.get("commands")
+    if commands is not None:
+        if not isinstance(commands, list) or not any(isinstance(x, str) and x.strip() for x in commands):
+            return False, "hints_used.commands_invalid"
+
+    return True, "ok"
+
+
 def _dump_kubectl(
     out_dir: Path,
     repo: Path,
@@ -538,6 +595,27 @@ def run_pipeline_verification(
                     evaluation=eval_res,
                     metrics_errors=metrics_errors,
                 )
+            if _is_truthy(eval_env.get("AIDER_FSM_REQUIRE_HINTS")):
+                expected = _parse_json_str_list(eval_env.get("AIDER_FSM_HINT_ANCHORS_JSON"))
+                ok_hints, hint_reason = _validate_hints_used(repo, expected_anchors=expected)
+                if not ok_hints:
+                    try:
+                        write_text(artifacts_dir / "hints_requirement_error.txt", hint_reason + "\n")
+                    except Exception:
+                        pass
+                    metrics_errors.append(f"evaluation.hints_requirement_failed: {hint_reason}")
+                    failed_stage = "evaluation"
+                    return VerificationResult(
+                        ok=False,
+                        failed_stage=failed_stage,
+                        auth=auth_res,
+                        tests=tests_res,
+                        deploy_setup=deploy_setup_res,
+                        deploy_health=deploy_health_res,
+                        rollout=rollout_res,
+                        evaluation=eval_res,
+                        metrics_errors=metrics_errors,
+                    )
 
         if pipeline and pipeline.evaluation_metrics_path:
             mpath = Path(pipeline.evaluation_metrics_path).expanduser()
