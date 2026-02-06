@@ -147,7 +147,7 @@ def _resolve_model(raw_model: str) -> str:
     return f"openai/{s}"
 
 
-def _ensure_contract_stage_skeleton(repo_root: Path) -> None:
+def _ensure_contract_stage_skeleton(repo_root: Path, *, force_rels: set[str] | None = None) -> None:
     """Best-effort: create robust default stage scripts before OpenCode scaffolding.
 
     This reduces common scaffolding failures (e.g., broken heredocs) without introducing
@@ -156,11 +156,35 @@ def _ensure_contract_stage_skeleton(repo_root: Path) -> None:
     repo_root = Path(repo_root).resolve()
     stages = (repo_root / ".aider_fsm" / "stages").resolve()
     stages.mkdir(parents=True, exist_ok=True)
+    force = set(str(x) for x in (force_rels or set()))
+
+    def _bash_syntax_ok(path: Path) -> bool:
+        try:
+            res = subprocess.run(
+                ["bash", "-n", str(path)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+        except Exception:
+            # If we cannot validate, avoid overwriting.
+            return True
+        return int(res.returncode) == 0
 
     def _write_if_missing(rel: str, content: str) -> None:
         p = (repo_root / rel).resolve()
-        if p.exists():
+        if rel in force:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
             return
+        if p.exists():
+            try:
+                if p.is_file() and p.stat().st_size > 0:
+                    if not str(p).endswith(".sh") or _bash_syntax_ok(p):
+                        return
+            except Exception:
+                return
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
 
@@ -429,6 +453,17 @@ def open_env(
                 if created_agent and agent is not None:
                     try:
                         agent.close()
+                    except Exception:
+                        pass
+                if bool(seed_stage_skeleton):
+                    # If OpenCode wrote broken stage scripts (common with truncated heredocs),
+                    # restore a known-good skeleton so downstream repair can proceed.
+                    try:
+                        force_rels: set[str] | None = None
+                        if bool(write_fallback_pipeline_yml):
+                            # Non-strict mode: prefer the runner's built-in generic helpers for rollout/evaluation.
+                            force_rels = {".aider_fsm/stages/rollout.sh", ".aider_fsm/stages/evaluation.sh"}
+                        _ensure_contract_stage_skeleton(repo_root, force_rels=force_rels)
                     except Exception:
                         pass
 

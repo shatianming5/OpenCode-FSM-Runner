@@ -169,6 +169,7 @@ See `examples/actions.example.yml`.
 
 - `docs/overview.md`
 - `docs/env_api.md`
+- `docs/verification_suite.md`
 - `docs/pipeline_spec.md`
 - `docs/bootstrap_spec.md`
 - `docs/metrics_schema.md`

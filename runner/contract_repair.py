@@ -60,6 +60,11 @@ def repair_contract(
         deploy_err = _read_text_tail(deploy_artifacts_dir / "deploy_setup_stderr.txt", n=4000)
         rollout_err = _read_text_tail(rollout_eval_artifacts_dir / "rollout_stderr.txt", n=4000)
         eval_err = _read_text_tail(rollout_eval_artifacts_dir / "evaluation_stderr.txt", n=4000)
+        # When evaluation uses `runner.generic_evaluation`, the real failure reason is typically
+        # recorded in `.aider_fsm/hints_run.json` rather than evaluation_stderr.txt.
+        hints_run_preview = _read_text_tail(repo / ".aider_fsm" / "hints_run.json", n=6000)
+        hints_used_preview = _read_text_tail(repo / ".aider_fsm" / "hints_used.json", n=3000)
+        bootstrap_preview = _read_text_tail(repo / ".aider_fsm" / "bootstrap.yml", n=3000)
         deploy_setup_sh = _read_text_tail(repo / ".aider_fsm" / "stages" / "deploy_setup.sh", n=4000)
         rollout_sh = _read_text_tail(repo / ".aider_fsm" / "stages" / "rollout.sh", n=4000)
         evaluation_sh = _read_text_tail(repo / ".aider_fsm" / "stages" / "evaluation.sh", n=4000)
@@ -109,8 +114,28 @@ def repair_contract(
             "    `$AIDER_FSM_PYTHON -m runner.generic_evaluation`\n"
             "  It already executes `AIDER_FSM_HINTS_JSON` safely, writes `hints_used.json` + `metrics.json`, and exits non-zero when required hints fail.\n"
             "  Do NOT hand-roll JSON parsing of hint env vars (easy to get wrong).\n"
+            "- If hinted/official commands fail due to missing deps, import errors, or version mismatches, DO NOT fake success.\n"
+            "  Instead, add `.aider_fsm/bootstrap.yml` to set up an isolated environment (e.g., venv) and install repo deps deterministically,\n"
+            "  then ensure evaluation runs the hinted command within that environment.\n"
+            "  IMPORTANT: bootstrap.yml is for **environment preparation only**. Do NOT run evaluation/test/benchmark commands in bootstrap\n"
+            "  (e.g. do NOT run `pytest`, `evalplus.evaluate`, `make test`, etc). Those belong in the stage scripts (especially evaluation.sh).\n"
+            "  IMPORTANT: if you create a venv, all installs MUST use the venv interpreter (`.aider_fsm/venv/bin/python -m pip ...`),\n"
+            "  not the system `python3 -m pip ...` (do not pollute global/user site-packages).\n"
+            "  Example bootstrap.yml pattern:\n"
+            "    version: 1\n"
+            "    cmds:\n"
+            "      - python3 -m venv .aider_fsm/venv\n"
+            "      - .aider_fsm/venv/bin/python -m pip install -U pip\n"
+            "      - .aider_fsm/venv/bin/pip install -e .\n"
+            "    env:\n"
+            "      PATH: \".aider_fsm/venv/bin:$PATH\"\n"
+            "  If you see `ValueError: Incompatible Language version ...` coming from tree-sitter,\n"
+            "  it is usually a dependency mismatch between `tree_sitter` and `tree-sitter-python`.\n"
+            "  Fix it in bootstrap.yml by pinning compatible versions in the venv before running the hinted command.\n"
+            "  Known-good pair (example): `tree_sitter==0.22.0` and `tree-sitter-python==0.21.0`.\n"
             "- NEVER set `ok=true` unless the evaluation actually ran and succeeded.\n"
             "- NEVER hardcode a non-zero score. Derive the score from real execution outputs.\n"
+            "- NOTE: the runner audits `.aider_fsm/stages/evaluation.sh` and will reject hardcoded non-zero scores and proxy/no-op evaluations.\n"
             "- rollout MUST also write a samples JSONL file under `$AIDER_FSM_ARTIFACTS_DIR` and include its path in `rollout.json.paths.samples_jsonl`.\n"
             "  Each JSONL line must be an object with keys: `prompt` (string), `completion` (string), `reward` (number).\n"
             "- IMPORTANT: if [EXTRA_CONTEXT] mentions `hf_qa_samples_too_few` OR `hf_qa_prompts_not_anchored`, this target is an HF QA snapshot.\n"
@@ -141,6 +166,15 @@ def repair_contract(
             "\n"
             "[EVALUATION_STDERR_TAIL]\n"
             f"{eval_err}\n"
+            "\n"
+            "[HINTS_RUN_JSON_TAIL]\n"
+            f"{hints_run_preview}\n"
+            "\n"
+            "[HINTS_USED_JSON_TAIL]\n"
+            f"{hints_used_preview}\n"
+            "\n"
+            "[BOOTSTRAP_YML_TAIL]\n"
+            f"{bootstrap_preview}\n"
             "\n"
             "[DEPLOY_SETUP_SH_TAIL]\n"
             f"{deploy_setup_sh}\n"

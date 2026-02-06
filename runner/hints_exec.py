@@ -227,6 +227,7 @@ def run_hints(
 
     kind = (env2.get("AIDER_LLM_KIND") or "").strip().lower()
     prefer_offline = _is_truthy(env2.get("AIDER_FSM_PREFER_OFFLINE_HINTS"))
+    login_shell = _is_truthy(env2.get("AIDER_FSM_HINT_LOGIN_SHELL"))
 
     def _priority(raw: str) -> int:
         s = str(raw or "").lower()
@@ -319,8 +320,12 @@ def run_hints(
         t0 = time.monotonic()
         timed_out = False
         try:
+            # IMPORTANT: prefer a non-login shell by default so bootstrap PATH overrides
+            # (e.g. `.aider_fsm/venv/bin:$PATH`) are preserved. Login shells frequently
+            # reset PATH via /etc/profile and can accidentally select global tools.
+            bash_args = ["bash", "-lc", sanitized] if login_shell else ["bash", "-c", sanitized]
             res = subprocess.run(
-                ["bash", "-lc", sanitized],
+                bash_args,
                 check=False,
                 capture_output=True,
                 text=True,

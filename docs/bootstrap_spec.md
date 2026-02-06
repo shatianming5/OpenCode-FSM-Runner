@@ -8,6 +8,10 @@ Notes:
 - The runner records bootstrap artifacts under `.aider_fsm/artifacts/<run_id>/...`.
 - Commands are subject to the same security policy as pipeline/actions commands.
 - In `--unattended strict` mode, likely-interactive commands are blocked.
+- Bootstrap is intended for **environment preparation** (venv/deps/build caches). Do not put evaluation/test/benchmark runs
+  (e.g. `pytest`, benchmark CLIs) into `bootstrap.yml`; keep those in the pipeline stages (especially `evaluation`).
+- If you create a venv under `.aider_fsm/venv`, prefer installing via the venv interpreter (`.aider_fsm/venv/bin/python -m pip ...`)
+  to avoid polluting global/user site-packages.
 
 ## Top-level
 

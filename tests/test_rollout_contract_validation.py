@@ -115,3 +115,30 @@ def test_validate_rollout_samples_enforces_hf_qa_prompt_anchoring(tmp_path: Path
     ok, reason = _validate_rollout_samples(repo, None, mode="full", eval_limit=3)
     assert ok is False
     assert "hf_qa_prompts_not_anchored" in reason
+
+
+def test_validate_rollout_samples_rejects_all_empty_completions(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+
+    samples_path = repo / "samples.jsonl"
+    _write(
+        samples_path,
+        "\n".join(
+            [
+                json.dumps({"prompt": "p1", "completion": "", "reward": 0.0}),
+                json.dumps({"prompt": "p2", "completion": "  ", "reward": 0.0}),
+                "",
+            ]
+        ),
+    )
+    rollout = {"paths": {"samples_jsonl": str(samples_path.resolve())}}
+    _write(repo / ".aider_fsm" / "rollout.json", json.dumps(rollout) + "\n")
+
+    ok, reason = _validate_rollout_samples(repo, None, mode="smoke", eval_limit=2)
+    assert ok is False
+    assert "samples_jsonl_all_empty_completions" in reason
+
+    _write(samples_path, json.dumps({"prompt": "p1", "completion": "c", "reward": 0.0}) + "\n")
+    ok2, reason2 = _validate_rollout_samples(repo, None, mode="smoke", eval_limit=1)
+    assert ok2 is True, reason2

@@ -87,6 +87,11 @@ The example single-file post-training loop consumes this contract:
 If you enable rollout contract validation (`require_samples=True` in code, or `--require-samples` in the verification suite),
 the runner validates that `rollout.json.paths.samples_jsonl` exists and contains valid `(prompt, completion, reward)` JSONL lines.
 
+Additional generic sanity checks (all targets):
+
+- If `rollout.json.counts.errors` is present and `errors >= samples`, the rollout is treated as invalid.
+- If **all** samples have empty/whitespace-only `completion`, the rollout is treated as invalid.
+
 For Hugging Face dataset snapshots (detected via `data/hf_manifest.json` + a test parquet with `question/answer` columns),
 it also enforces:
 
@@ -130,10 +135,20 @@ Offline preference (optional):
 - Set `AIDER_FSM_PREFER_OFFLINE_HINTS=1` to prefer commands that can run without remote inference (e.g. `--samples ...`),
   and de-prioritize `--backend openai` hints.
 
+Shell execution note (optional):
+
+- Hint commands are executed via a **non-login** shell by default (`bash -c ...`) so bootstrap PATH overrides
+  like `.aider_fsm/venv/bin:$PATH` are preserved.
+- If you explicitly need a login shell, set `AIDER_FSM_HINT_LOGIN_SHELL=1` (uses `bash -lc ...`).
+
 Timeout overrides (optional):
 
 - `AIDER_FSM_MAX_CMD_SECONDS=<int>`: override `pipeline.security.max_cmd_seconds` **at runtime** (useful for long-running “full” evals).
 - `AIDER_FSM_MAX_TOTAL_SECONDS=<int>`: override `pipeline.security.max_total_seconds` at runtime.
+
+Token cap (optional):
+
+- `AIDER_FSM_MAX_TOKENS=<int>`: sets `max_tokens` used by the built-in `runner.generic_rollout` OpenAI-compatible requests.
 
 ---
 

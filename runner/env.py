@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,6 +92,37 @@ def _read_json_object(path: Path) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         return None
     return data
+
+
+def _ensure_openai_v1_base(base_url: str) -> str:
+    b = str(base_url or "").strip().rstrip("/")
+    if not b:
+        return ""
+    return b if b.endswith("/v1") else b + "/v1"
+
+
+def _runtime_openai_config(runtime_env_path: Path) -> tuple[str | None, str | None]:
+    """Best-effort: derive (OPENAI_API_BASE, OPENAI_MODEL) from runtime_env.json."""
+    p = Path(runtime_env_path).expanduser().resolve()
+    obj = _read_json_object(p)
+    if obj is None:
+        return None, None
+
+    base = ""
+    model = ""
+
+    inf = obj.get("inference")
+    if isinstance(inf, dict):
+        base = str(inf.get("openai_base_url") or inf.get("base_url") or "").strip()
+        model = str(inf.get("model") or "").strip()
+
+    if not base:
+        svc = obj.get("service")
+        if isinstance(svc, dict):
+            base = str(svc.get("base_url") or "").strip()
+
+    base_v1 = _ensure_openai_v1_base(base) if base else ""
+    return (base_v1 or None), (model or None)
 
 
 def _verification_errors_summary(verify: Any) -> str:
@@ -225,6 +259,29 @@ def _validate_rollout_samples(
     obj = _read_json_object(p)
     if obj is None:
         return False, "rollout_json_not_object"
+
+    # Best-effort: if rollout explicitly reports that all sample attempts errored, fail fast.
+    counts = obj.get("counts")
+    if isinstance(counts, dict):
+        raw_samples = counts.get("samples")
+        raw_errors = counts.get("errors")
+        try:
+            n_samples = int(raw_samples) if isinstance(raw_samples, (int, float, str)) else None
+        except Exception:
+            n_samples = None
+        try:
+            n_errors = int(raw_errors) if isinstance(raw_errors, (int, float, str)) else None
+        except Exception:
+            n_errors = None
+        if (
+            isinstance(n_samples, int)
+            and isinstance(n_errors, int)
+            and n_samples > 0
+            and n_errors > 0
+            and n_errors >= n_samples
+        ):
+            return False, f"rollout_counts_all_errors: errors={n_errors} samples={n_samples}"
+
     paths = obj.get("paths")
     if not isinstance(paths, dict):
         return False, "rollout_json_missing_paths"
@@ -275,6 +332,7 @@ def _validate_rollout_samples(
 
     # Parse samples (bounded by the contract and, when applicable, by expected_min).
     valid = 0
+    nonempty_completions = 0
     distinct_prompts: set[str] = set()
     to_scan = int(expected_min or 1)
     # Keep a cap for prompt diversity scanning (does not affect counting).
@@ -296,6 +354,8 @@ def _validate_rollout_samples(
                 reward = item.get("reward")
                 if isinstance(prompt, str) and isinstance(completion, str) and isinstance(reward, (int, float)):
                     valid += 1
+                    if completion.strip():
+                        nonempty_completions += 1
                     if len(distinct_prompts) < diversity_scan_cap:
                         distinct_prompts.add(prompt)
                         if qa_anchor_target > 0 and len(matched_anchors) < qa_anchor_target:
@@ -304,11 +364,12 @@ def _validate_rollout_samples(
                                 if qn and qn in pn:
                                     matched_anchors.add(qn)
                                     break
-                    if expected_min is None and valid >= 1:
+                    if expected_min is None and nonempty_completions >= 1:
                         return True, "ok"
                     if (
                         expected_min is not None
                         and valid >= int(expected_min)
+                        and nonempty_completions >= 1
                         and len(distinct_prompts) >= int(distinct_target)
                         and (qa_anchor_target <= 0 or len(matched_anchors) >= int(qa_anchor_target))
                     ):
@@ -318,6 +379,8 @@ def _validate_rollout_samples(
 
     if valid <= 0:
         return False, "samples_jsonl_has_no_valid_samples"
+    if nonempty_completions <= 0:
+        return False, "samples_jsonl_all_empty_completions"
     if expected_min is not None and valid < int(expected_min):
         return False, f"hf_qa_samples_too_few: expected>={expected_min} got={valid}"
     if expected_min is not None and len(distinct_prompts) < int(distinct_target):
@@ -380,6 +443,9 @@ class EnvSession:
             raise ValueError("missing_llm: call deploy/rollout with llm=model_dir first")
         overrides["AIDER_LLM_KIND"] = "local_hf"
         overrides["AIDER_TRAINED_MODEL_DIR"] = str(self.trained_model_dir)
+        model_id = str(self.trained_model_dir.name or "").strip()
+        if model_id:
+            overrides.setdefault("OPENAI_MODEL", model_id)
         overrides.pop("AIDER_LLM_MODEL", None)
 
     def _base_overrides(self, *, mode: str, extra: dict[str, str] | None) -> dict[str, str]:
@@ -409,6 +475,149 @@ class EnvSession:
             out.update(with_runtime_env_path(self.runtime_env_path))
         return out
 
+    def _apply_runtime_env_inference_overrides(self, overrides: dict[str, str]) -> None:
+        if self.runtime_env_path is None:
+            return
+        base, model = _runtime_openai_config(self.runtime_env_path)
+        if base:
+            explicit = any(
+                str(overrides.get(k) or "").strip() for k in ("OPENAI_API_BASE", "OPENAI_BASE_URL")
+            )
+            # For local_hf, runtime_env.json is the source of truth even if the base env is set (e.g. .env).
+            if self.llm_kind == "local_hf" or not explicit:
+                overrides["OPENAI_API_BASE"] = base
+                overrides["OPENAI_BASE_URL"] = base
+        if model:
+            overrides.setdefault("OPENAI_MODEL", model)
+            overrides.setdefault("AIDER_LLM_MODEL", model)
+        if self.llm_kind == "local_hf":
+            overrides.setdefault("OPENAI_API_KEY", str(overrides.get("OPENAI_API_KEY") or "local"))
+
+    def _runner_root(self) -> Path:
+        return Path(__file__).resolve().parents[1]
+
+    def _env_with_runner_pythonpath(self, overrides: dict[str, str]) -> dict[str, str]:
+        env2 = dict(os.environ)
+        env2.update({str(k): str(v) for k, v in (overrides or {}).items()})
+        runner_root = str(self._runner_root())
+        existing_pp = str(env2.get("PYTHONPATH") or "")
+        parts = [p for p in existing_pp.split(os.pathsep) if p]
+        if runner_root not in parts:
+            env2["PYTHONPATH"] = runner_root + (os.pathsep + existing_pp if existing_pp else "")
+        return env2
+
+    def _best_effort_stop_local_server(self, *, overrides: dict[str, str]) -> None:
+        pid_file = (self.env.repo / ".aider_fsm" / "server.pid").resolve()
+        if not pid_file.exists():
+            return
+        env2 = self._env_with_runner_pythonpath(overrides)
+        try:
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "runner.ml.serve_openai_compat",
+                    "stop",
+                    "--pid-file",
+                    str(pid_file),
+                    "--timeout-seconds",
+                    "10",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                cwd=str(self.env.repo),
+                env=env2,
+                timeout=20,
+            )
+        except Exception:
+            return
+
+    def _ensure_local_openai_service(self, *, artifacts_dir: Path, overrides: dict[str, str]) -> None:
+        """Ensure a local OpenAI-compatible base_url exists for local_hf runs.
+
+        Some scaffolded contracts may write runtime_env.json without starting a server.
+        For local_hf, the runner can start its built-in OpenAI-compatible server (no hardcoded ports)
+        and update runtime_env.json so downstream rollout/evaluation commands can use OPENAI_API_BASE.
+        """
+        if self.llm_kind != "local_hf":
+            return
+        if self.runtime_env_path is None:
+            return
+        # Only treat local_hf as "ready" if runtime_env.json looks like a started local
+        # OpenAI-compatible service (i.e., `runner.ml.serve_openai_compat`).
+        obj = _read_json_object(Path(self.runtime_env_path))
+        svc_base = ""
+        inf_type = ""
+        if isinstance(obj, dict):
+            svc = obj.get("service")
+            if isinstance(svc, dict):
+                svc_base = str(svc.get("base_url") or "").strip()
+            inf = obj.get("inference")
+            if isinstance(inf, dict):
+                inf_type = str(inf.get("type") or "").strip()
+        if svc_base and inf_type.strip().lower() == "openai_compat":
+            try:
+                from urllib.parse import urlparse
+
+                u = urlparse(svc_base)
+                if u.scheme in ("http", "https") and u.hostname and u.port:
+                    return
+            except Exception:
+                pass
+        if self.trained_model_dir is None:
+            raise ValueError("missing_llm: call deploy/rollout with llm=model_dir first")
+
+        artifacts_dir = Path(artifacts_dir).resolve()
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        runtime_env_out = Path(self.runtime_env_path).expanduser().resolve()
+        pid_file = (self.env.repo / ".aider_fsm" / "server.pid").resolve()
+        log_file = (artifacts_dir / "server.log").resolve()
+
+        env2 = self._env_with_runner_pythonpath(overrides)
+        # Ensure we don't leave orphan servers around if called multiple times.
+        self._best_effort_stop_local_server(overrides=overrides)
+
+        try:
+            res = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "runner.ml.serve_openai_compat",
+                    "start",
+                    "--backend",
+                    "hf",
+                    "--model-dir",
+                    str(self.trained_model_dir),
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    "0",
+                    "--runtime-env-out",
+                    str(runtime_env_out),
+                    "--pid-file",
+                    str(pid_file),
+                    "--log-file",
+                    str(log_file),
+                    "--startup-timeout",
+                    "60",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                cwd=str(self.env.repo),
+                env=env2,
+                timeout=120,
+            )
+        except Exception as e:
+            raise RuntimeError(f"local_openai_service_start_failed: {e}") from e
+
+        if int(res.returncode) != 0:
+            tail = (res.stderr or res.stdout or "").strip()
+            if len(tail) > 2000:
+                tail = tail[-2000:]
+            raise RuntimeError(f"local_openai_service_start_failed: rc={res.returncode} tail={tail}")
+
     def _maybe_teardown(self, *, run_root: Path, overrides: dict[str, str]) -> None:
         try:
             _deploy_teardown(
@@ -418,7 +627,8 @@ class EnvSession:
                 unattended=str(self.unattended or "strict"),
             )
         except Exception:
-            return
+            pass
+        self._best_effort_stop_local_server(overrides=overrides)
 
     def deploy(
         self,
@@ -447,7 +657,17 @@ class EnvSession:
             )
             if res.ok:
                 self.runtime_env_path = res.runtime_env_path or (self.env.repo / ".aider_fsm" / "runtime_env.json").resolve()
-                return res
+                overrides2 = dict(overrides)
+                overrides2.update(with_runtime_env_path(self.runtime_env_path))
+                self._ensure_local_openai_service(artifacts_dir=deploy_dir, overrides=overrides2)
+                rt = _read_json_object(self.runtime_env_path) or res.runtime_env
+                return DeployCallResult(
+                    ok=bool(res.ok),
+                    artifacts_dir=res.artifacts_dir,
+                    runtime_env_path=self.runtime_env_path,
+                    runtime_env=rt if isinstance(rt, dict) else res.runtime_env,
+                    verify=res.verify,
+                )
 
             if attempt >= int(max(0, repair_iters)):
                 return res
@@ -520,6 +740,8 @@ class EnvSession:
 
             self.runtime_env_path = deploy_res.runtime_env_path or (self.env.repo / ".aider_fsm" / "runtime_env.json").resolve()
             overrides.update(with_runtime_env_path(self.runtime_env_path))
+            self._ensure_local_openai_service(artifacts_dir=deploy_dir, overrides=overrides)
+            self._apply_runtime_env_inference_overrides(overrides)
 
             rollout_res = _rollout(
                 self.env,
@@ -601,6 +823,8 @@ class EnvSession:
             if self.runtime_env_path is not None and attempt == 0:
                 # Fast path: reuse the existing deploy and only run evaluation.
                 overrides.update(with_runtime_env_path(self.runtime_env_path))
+                self._ensure_local_openai_service(artifacts_dir=eval_dir, overrides=overrides)
+                self._apply_runtime_env_inference_overrides(overrides)
                 eval_res = _evaluate(
                     self.env,
                     artifacts_dir=eval_dir,
@@ -671,6 +895,8 @@ class EnvSession:
 
                 self.runtime_env_path = deploy_res.runtime_env_path or (self.env.repo / ".aider_fsm" / "runtime_env.json").resolve()
                 overrides.update(with_runtime_env_path(self.runtime_env_path))
+                self._ensure_local_openai_service(artifacts_dir=deploy_dir, overrides=overrides)
+                self._apply_runtime_env_inference_overrides(overrides)
                 _rollout_res, eval_res = _rollout_and_evaluate(
                     self.env,
                     artifacts_dir=roll_eval_dir,
@@ -783,6 +1009,8 @@ class EnvSession:
             self.runtime_env_path = deploy_res.runtime_env_path or (self.env.repo / ".aider_fsm" / "runtime_env.json").resolve()
             overrides2 = dict(overrides)
             overrides2.update(with_runtime_env_path(self.runtime_env_path))
+            self._ensure_local_openai_service(artifacts_dir=deploy_dir, overrides=overrides2)
+            self._apply_runtime_env_inference_overrides(overrides2)
 
             rollout_res, eval_res = _rollout_and_evaluate(
                 self.env,
@@ -885,7 +1113,7 @@ class EnvSession:
     ) -> bool:
         overrides = self._base_overrides(mode=str((env_overrides or {}).get("AIDER_EVAL_MODE") or "smoke"), extra=env_overrides)
         run_root = _resolve_run_root(self.env.repo, run_id=self.run_id, artifacts_dir=artifacts_dir)
-        return bool(
+        ok = bool(
             _deploy_teardown(
                 self.env,
                 artifacts_dir=(run_root / "deploy_teardown").resolve(),
@@ -893,6 +1121,8 @@ class EnvSession:
                 unattended=str(self.unattended or "strict"),
             )
         )
+        self._best_effort_stop_local_server(overrides=overrides)
+        return ok
 
 
 _DEFAULT_SESSION: EnvSession | None = None

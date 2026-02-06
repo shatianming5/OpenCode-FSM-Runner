@@ -115,16 +115,38 @@ def _ensure_v1(base: str) -> str:
     return b + "/v1"
 
 
-def _chat_completion(*, base_url: str, api_key: str | None, model: str, prompt: str, timeout_seconds: int) -> str:
+def _env_int(name: str) -> int | None:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        n = int(raw)
+    except Exception:
+        return None
+    return n if n > 0 else None
+
+
+def _chat_completion(
+    *,
+    base_url: str,
+    api_key: str | None,
+    model: str,
+    prompt: str,
+    timeout_seconds: int,
+    max_tokens: int | None = None,
+) -> str:
     url = _ensure_v1(base_url) + "/chat/completions"
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    if max_tokens is None:
+        max_tokens = _env_int("AIDER_FSM_MAX_TOKENS") or 256
+    max_tokens = max(1, int(max_tokens))
     payload: dict[str, Any] = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
-        "max_tokens": 256,
+        "max_tokens": int(max_tokens),
     }
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
@@ -381,6 +403,7 @@ def main() -> int:
     samples_path = (artifacts_dir / f"rollout_samples_{int(time.time())}.jsonl").resolve()
 
     samples_written = 0
+    errors_count = 0
     with samples_path.open("w", encoding="utf-8") as f:
         for prompt in prompts:
             try:
@@ -393,6 +416,7 @@ def main() -> int:
                 )
             except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError):
                 completion = ""
+                errors_count += 1
             obj = {"prompt": prompt, "completion": completion, "reward": 0.0}
             f.write(json.dumps(obj, ensure_ascii=False) + "\n")
             samples_written += 1
@@ -403,7 +427,7 @@ def main() -> int:
         "ts": _now_iso(),
         "ok": True,
         "mode": mode,
-        "counts": {"samples": samples_written},
+        "counts": {"samples": samples_written, "errors": int(errors_count)},
         "paths": {"samples_jsonl": str(samples_path)},
     }
     rollout_path.write_text(json.dumps(rollout, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

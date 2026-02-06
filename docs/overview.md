@@ -31,6 +31,7 @@ The intent is to integrate with agent projects where you need **repeatable bench
 - `docs/bootstrap_spec.md`
 - `docs/metrics_schema.md`
 - `docs/env_api.md` (single-file `import env` API)
+- `docs/verification_suite.md` (end-to-end validation harness)
 
 ## Optional: local model utilities
 
