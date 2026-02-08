@@ -2,6 +2,19 @@
 
 This repo exposes a small **programmatic API** designed for “all code in one file” training/eval loops:
 
+Recommended library-style usage (import `runner.env` as `runner_env`):
+
+```python
+from runner import env as runner_env
+
+sess = runner_env.setup("https://github.com/<owner>/<repo>")  # or a HF dataset URL
+sess.rollout("my-remote-model-name", mode="smoke")            # or a local HF model directory
+sess.evaluate(mode="smoke")                                   # uses the session's configured llm
+sess.teardown()
+```
+
+Compatibility wrapper (top-level `env.py`):
+
 ```python
 import env
 
@@ -15,6 +28,7 @@ env.teardown(session=sess)
 
 - 在**不写 benchmark-specific 硬编码**的前提下，让你可以在单个训练脚本里用 `setup/rollout/evaluate` 形式驱动任意 repo / benchmark / dataset。
 - 最大化 OpenCode 的自主性：缺少 `pipeline.yml` 时由 OpenCode scaffold 合同；评测/测试命令尽量来自目标仓库的 README / docs / CI workflows（而不是 runner 手写启动逻辑）。
+- 作为库（library）使用：支持 `from runner import env as runner_env`，并通过 `sess = runner_env.setup(url)` → `sess.rollout(llm)` → `sess.evaluate()` 驱动闭环（`runner_env` 只是一个 import alias）。
 
 ---
 
@@ -59,6 +73,17 @@ Main calls:
 - `env.evaluation(session=..., ...)` (compat alias)
 - `env.rollout_and_evaluation(llm, session=..., ...)`
 - `env.teardown(session=..., ...)`
+
+### Library usage: call methods on `EnvSession`
+
+If you prefer an object-oriented library style, use:
+
+- `from runner import env as runner_env`
+- then call methods on the returned `EnvSession`:
+  - `sess.deploy(llm, ...)`: sets the LLM context (local vs remote) and prepares runtime env.
+  - `sess.rollout(llm=None, ...)`: if `llm` is provided, it becomes the session's active LLM; otherwise it reuses the existing one.
+  - `sess.evaluate(...)` / `sess.evaluation(...)`: **does not accept `llm`**; it reuses the session's configured LLM.
+    - If you want a single call that sets `llm` and runs both stages, use `sess.rollout_and_evaluation(llm, ...)`.
 
 ### `llm` parameter (local vs remote)
 

@@ -41,4 +41,4 @@ Artifacts are written under `.aider_fsm/artifacts/<run_id>/`.
 ## Optional: programmatic usage
 
 If you want to drive `setup/rollout/evaluation` from a single Python training script (no benchmark-specific runner code),
-see `docs/env_api.md` (`import env`).
+see `docs/env_api.md` (recommended: `from runner import env as runner_env`; compatibility wrapper: `import env`).

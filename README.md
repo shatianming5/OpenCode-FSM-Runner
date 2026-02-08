@@ -199,22 +199,23 @@ pytest -q
 
 If you want a single-file workflow like:
 
-- `import env`
-- `env.setup(url_or_path)`
-- `env.rollout(llm, ...)`
-- `env.evaluate(...)`
+- `from runner import env as runner_env`
+- `sess = runner_env.setup(url_or_path)`
+- `sess.rollout(llm, ...)`
+- `sess.evaluate(...)` (note: `evaluate()` reuses the session's configured `llm`)
 
 See `docs/env_api.md`.
+(`import env` also works as a compatibility wrapper, but `runner.env` is the primary library entrypoint.)
 
 ```python
-import env
+from runner import env as runner_env
 
-sess = env.setup("https://github.com/<owner>/<repo>")
-rollout_res = env.rollout("deepseek-v3.2", session=sess, mode="full")
-eval_res = env.evaluate(session=sess, mode="full")
+sess = runner_env.setup("https://github.com/<owner>/<repo>")
+rollout_res = sess.rollout("deepseek-v3.2", mode="full")
+eval_res = sess.evaluate(mode="full")
 print(eval_res.metrics)  # dict written by the target contract
 print(eval_res.artifacts_dir)
-env.teardown(session=sess)
+sess.teardown()
 ```
 
 For end-to-end verification across multiple targets (URL/path) without benchmark-specific runner code:
