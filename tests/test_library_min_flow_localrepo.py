@@ -5,7 +5,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from runner import env as runner_env
+import runner_env
 
 
 def _write_json(path: Path, obj: dict) -> None:
@@ -122,34 +122,28 @@ def test_library_setup_rollout_evaluate_min_repo(tmp_path: Path) -> None:
 
     sess = runner_env.setup(repo, strict_opencode=True, require_metrics=True, unattended="strict")
     hint_cmd = f"{py} -c \"print('score 0.2')\""
+    common_overrides = {
+        "AIDER_FSM_REQUIRE_HINTS": "1",
+        "AIDER_FSM_REQUIRE_REAL_SCORE": "1",
+        "AIDER_FSM_HINTS_JSON": json.dumps([hint_cmd]),
+        "AIDER_FSM_HINT_ANCHORS_JSON": json.dumps(["score"]),
+        "AIDER_FSM_HINT_MAX_ATTEMPTS": "1",
+        "AIDER_FSM_HINT_TIMEOUT_SECONDS": "30",
+    }
 
     r = sess.rollout(
         llm="deepseek-v3.2",
         mode="smoke",
         require_samples=True,
         repair_iters=0,
-        env_overrides={
-            "AIDER_FSM_REQUIRE_HINTS": "1",
-            "AIDER_FSM_REQUIRE_REAL_SCORE": "1",
-            "AIDER_FSM_HINTS_JSON": json.dumps([hint_cmd]),
-            "AIDER_FSM_HINT_ANCHORS_JSON": json.dumps(["score"]),
-            "AIDER_FSM_HINT_MAX_ATTEMPTS": "1",
-            "AIDER_FSM_HINT_TIMEOUT_SECONDS": "30",
-        },
+        env_overrides=dict(common_overrides),
     )
     assert r.ok is True
 
     e = sess.evaluate(
         mode="smoke",
         repair_iters=0,
-        env_overrides={
-            "AIDER_FSM_REQUIRE_HINTS": "1",
-            "AIDER_FSM_REQUIRE_REAL_SCORE": "1",
-            "AIDER_FSM_HINTS_JSON": json.dumps([hint_cmd]),
-            "AIDER_FSM_HINT_ANCHORS_JSON": json.dumps(["score"]),
-            "AIDER_FSM_HINT_MAX_ATTEMPTS": "1",
-            "AIDER_FSM_HINT_TIMEOUT_SECONDS": "30",
-        },
+        env_overrides=dict(common_overrides),
     )
     assert e.ok is True
     assert isinstance(e.metrics, dict)
@@ -164,3 +158,13 @@ def test_library_setup_rollout_evaluate_min_repo(tmp_path: Path) -> None:
 
     # `sess.evaluate()` must auto-teardown best-effort (deploy_teardown.sh writes a marker).
     assert (repo / ".aider_fsm" / "teardown_ran.txt").exists()
+
+    # `sess.evaluate(llm=...)` should work too (even if called on a fresh session).
+    sess2 = runner_env.setup(repo, strict_opencode=True, require_metrics=True, unattended="strict")
+    e2 = sess2.evaluate(
+        llm="deepseek-v3.2",
+        mode="smoke",
+        repair_iters=0,
+        env_overrides=dict(common_overrides),
+    )
+    assert e2.ok is True

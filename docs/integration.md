@@ -33,7 +33,7 @@ Keep the metrics small and stable; write full raw logs into artifacts.
 Use the library API:
 
 ```python
-from runner import env as runner_env
+import runner_env
 
 sess = runner_env.setup("/abs/path/to/target_repo")  # or a repo URL
 sess.rollout(llm="deepseek-v3.2", mode="smoke", require_samples=True, repair_iters=0)
@@ -45,4 +45,4 @@ Artifacts are written under `.aider_fsm/artifacts/<run_id>/`.
 ## Optional: programmatic usage
 
 If you want to drive `setup/rollout/evaluation` from a single Python training script (no benchmark-specific runner code),
-see `docs/env_api.md` (recommended: `from runner import env as runner_env`).
+see `docs/env_api.md` (recommended: `import runner_env`).

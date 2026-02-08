@@ -5,7 +5,7 @@
 只允许的公共入口：
 
 ```python
-from runner import env as runner_env
+import runner_env
 
 sess = runner_env.setup("https://...")
 sess.rollout(llm="deepseek-v3.2", ...)
@@ -32,7 +32,7 @@ sess.evaluate(...)
 
 ```bash
 python3 - <<'PY'
-from runner import env as runner_env
+import runner_env
 
 TARGETS = [
     "https://github.com/evalplus/evalplus",
@@ -81,7 +81,7 @@ PY
 
 ```bash
 python3 - <<'PY'
-from runner import env as runner_env
+import runner_env
 
 TARGETS = [
     "https://github.com/evalplus/evalplus",
@@ -139,4 +139,3 @@ PY
   - `.aider_fsm/rollout.json`
   - `.aider_fsm/metrics.json`
   - `.aider_fsm/hints_used.json`（当存在 hints 且 `AIDER_FSM_REQUIRE_HINTS=1` 时）
-

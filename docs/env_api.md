@@ -2,10 +2,10 @@
 
 This repo exposes a small **programmatic API** designed for driving target repos end-to-end without benchmark-specific runner code.
 
-Recommended (and only supported) library-style usage (import `runner.env` as `runner_env`):
+Recommended (and only supported) library-style usage (import `runner_env`):
 
 ```python
-from runner import env as runner_env
+import runner_env
 
 sess = runner_env.setup("https://github.com/<owner>/<repo>")  # or a HF dataset URL
 sess.rollout(llm="my-remote-model-name", mode="smoke")        # or a local HF model directory path
@@ -16,7 +16,8 @@ sess.evaluate(mode="smoke")                                   # uses the session
 
 - 在**不写 benchmark-specific 硬编码**的前提下，让你可以在单个训练脚本里用 `setup/rollout/evaluate` 形式驱动任意 repo / benchmark / dataset。
 - 最大化 OpenCode 的自主性：缺少 `pipeline.yml` 时由 OpenCode scaffold 合同；评测/测试命令尽量来自目标仓库的 README / docs / CI workflows（而不是 runner 手写启动逻辑）。
-- 作为库（library）使用（硬需求）：只支持 `from runner import env as runner_env`，并通过 `sess = runner_env.setup(url)` → `sess.rollout(llm=...)` → `sess.evaluate()` 驱动闭环（`runner_env` 只是一个 import alias）。
+- 作为库（library）使用（硬需求）：只支持 `import runner_env`（推荐）或 `from runner import env as runner_env`（等价），并通过
+  `sess = runner_env.setup(url)` → `sess.rollout(llm=...)` → `sess.evaluate()` 驱动闭环（`runner_env` 只是一个 import alias）。
 
 ---
 
@@ -55,7 +56,7 @@ Only supported calls:
 Notes:
 
 - `rollout()` requires an explicit `llm=...`.
-- `evaluate()` does **not** accept `llm`; it reuses the session's configured LLM from `rollout()`.
+- `evaluate()` can reuse the session's configured LLM from `rollout()`, or accept `llm=...` as a convenience.
 - `evaluate()` runs a best-effort teardown automatically at the end (no public teardown API).
 
 ### `llm` parameter (local vs remote)

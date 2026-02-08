@@ -908,6 +908,7 @@ class EnvSession:
 
     def evaluate(
         self,
+        llm: str | Path | None = None,
         *,
         mode: str = "smoke",
         env_overrides: dict[str, str] | None = None,
@@ -918,8 +919,10 @@ class EnvSession:
         # 能否简略：否
         # 原因：公共 API/关键编排点；规模≈20 行；引用次数≈4（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
         # 证据：位置=runner/env.py:825；类型=method；引用≈4；规模≈20行
+        if llm is not None:
+            self._set_llm(llm)
+
         run_root = _resolve_run_root(self.env.repo, run_id=self.run_id, artifacts_dir=artifacts_dir)
-        overrides = self._base_overrides(mode=mode, extra=env_overrides)
         try:
             res = self._evaluation(
                 mode=mode,
@@ -929,6 +932,7 @@ class EnvSession:
             )
             return res
         finally:
+            overrides = self._base_overrides(mode=mode, extra=env_overrides)
             self._maybe_teardown(run_root=run_root / "final_teardown", overrides=overrides)
 
 

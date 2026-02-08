@@ -32,7 +32,7 @@ pip install -r requirements.txt
 Only supported entrypoints:
 
 ```python
-from runner import env as runner_env
+import runner_env
 
 sess = runner_env.setup("https://github.com/<owner>/<repo>")
 sess.rollout(llm="deepseek-v3.2", mode="smoke", require_samples=True, repair_iters=0)
@@ -43,7 +43,7 @@ print(res.ok, res.metrics)
 Notes:
 
 - `sess.rollout()` requires an explicit `llm=...` (remote model id/name, or a local model dir path).
-- `sess.evaluate()` does **not** accept `llm`; it reuses the session's configured LLM from `rollout()`.
+- `sess.evaluate()` can reuse the session LLM from `rollout()`, or accept `llm=...` as a convenience (for one-shot runs).
 - `sess.evaluate()` performs a best-effort teardown automatically at the end (no public teardown API).
 
 ## OpenCode server (optional)
@@ -57,7 +57,7 @@ OPENCODE_SERVER_PASSWORD=... opencode serve --hostname 127.0.0.1 --port 4096
 Then point `setup()` at it:
 
 ```python
-from runner import env as runner_env
+import runner_env
 
 sess = runner_env.setup(
     "https://github.com/<owner>/<repo>",

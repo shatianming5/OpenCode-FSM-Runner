@@ -47,3 +47,15 @@ def test_runner_env_public_surface_is_minimal() -> None:
     assert not hasattr(cls, "rollout_and_evaluation")
     assert not hasattr(cls, "teardown")
 
+    # Also support the convenient top-level import alias (`import runner_env`).
+    import runner_env as runner_env_alias
+
+    assert hasattr(runner_env_alias, "setup")
+    assert not hasattr(runner_env_alias, "deploy")
+    assert not hasattr(runner_env_alias, "rollout")
+    assert not hasattr(runner_env_alias, "evaluation")
+    assert not hasattr(runner_env_alias, "rollout_and_evaluation")
+    assert not hasattr(runner_env_alias, "teardown")
+    assert not hasattr(runner_env_alias, "current_session")
+
+    assert hasattr(runner_env_alias, "EnvSession")
