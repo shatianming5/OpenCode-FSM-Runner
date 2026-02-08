@@ -12,7 +12,11 @@ from .actions import run_pending_actions
 from .agent_client import AgentClient, AgentResult
 from .bootstrap import run_bootstrap
 from .contract_hints import suggest_contract_hints
-from .env_local import _ensure_contract_stage_skeleton, _write_fallback_pipeline_yml
+from .contract_provenance import (
+    build_contract_provenance_report,
+    dump_provenance,
+    snapshot_contract_files,
+)
 from .opencode_client import OpenCodeClient
 from .pipeline_spec import PipelineSpec, load_pipeline_spec
 from .pipeline_verify import fmt_stage_tail, run_pipeline_verification, stage_rc
@@ -25,12 +29,33 @@ from .prompts import (
     make_mark_done_prompt,
     make_plan_update_prompt,
     make_scaffold_contract_prompt,
+    make_scaffold_contract_retry_prompt,
 )
 from .snapshot import build_snapshot, get_git_changed_files, git_checkout, non_plan_changes
 from .state import append_jsonl, default_state, ensure_dirs, now_iso, load_state, save_state
 from .subprocess_utils import read_text_if_exists, run_cmd, tail, write_json, write_text
-from .scaffold_validation import validate_scaffolded_files, validate_scaffolded_pipeline
+from .scaffold_validation import validate_scaffold_contract
 from .types import VerificationResult
+
+
+def _classify_opencode_transport_error(err_text: str) -> str:
+    low = str(err_text or "").strip().lower()
+    if not low:
+        return ""
+    needles = (
+        "connection refused",
+        "failed to establish a new connection",
+        "connection reset",
+        "connection aborted",
+        "timed out",
+        "timeout",
+        "network is unreachable",
+        "temporary failure in name resolution",
+        "name or service not known",
+    )
+    if any(n in low for n in needles):
+        return "opencode_transport_unavailable"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -59,11 +84,16 @@ class RunnerConfig:
     opencode_url: str
     opencode_timeout_seconds: int
     opencode_bash: str
-    scaffold_opencode_bash: str = "full"
+    opencode_retry_attempts: int = 2
+    opencode_retry_backoff_seconds: float = 2.0
+    opencode_context_length: int | None = None
+    opencode_max_prompt_chars: int | None = None
+    scaffold_opencode_bash: str = "restricted"
     tests_from_user: bool = False
     require_pipeline: bool = False
     scaffold_contract: str = "off"  # off|opencode
     scaffold_require_metrics: bool = True
+    strict_opencode: bool = True
 
 
 def _load_seed_block(seed_files: list[str]) -> str:
@@ -226,8 +256,16 @@ def run(config: RunnerConfig, *, agent: AgentClient | None = None) -> int:
             model=config.model,
             base_url=(str(config.opencode_url or "").strip() or None),
             timeout_seconds=int(config.opencode_timeout_seconds or 300),
+            request_retry_attempts=int(config.opencode_retry_attempts or 0),
+            request_retry_backoff_seconds=float(config.opencode_retry_backoff_seconds or 0.0),
+            context_length=(
+                int(config.opencode_context_length) if config.opencode_context_length is not None else None
+            ),
+            max_prompt_chars=(
+                int(config.opencode_max_prompt_chars) if config.opencode_max_prompt_chars is not None else None
+            ),
             bash_mode=str(config.opencode_bash or "restricted"),
-            scaffold_bash_mode=str(config.scaffold_opencode_bash or "full"),
+            scaffold_bash_mode=str(config.scaffold_opencode_bash or "restricted"),
             unattended=str(config.unattended or "strict"),
             server_log_path=artifacts_run_dir / "opencode_server.log",
             session_title=f"{repo.name}:{run_id}",
@@ -242,83 +280,158 @@ def run(config: RunnerConfig, *, agent: AgentClient | None = None) -> int:
     if need_scaffold and scaffold_mode == "opencode":
         # Agent-first contract scaffolding: let OpenCode write `pipeline.yml` + `.aider_fsm/`.
         scaffold_err = ""
-        try:
-            scaffold_agent = _ensure_agent(pipeline_rel_override="pipeline.yml")
-            _ensure_contract_stage_skeleton(repo)
-            hints = suggest_contract_hints(repo)
-            if hints.commands:
-                write_text(artifacts_run_dir / "scaffold_command_hints.txt", "\n".join(hints.commands) + "\n")
-            res = _agent_run(
-                scaffold_agent,
-                make_scaffold_contract_prompt(
-                    repo,
-                    pipeline_rel="pipeline.yml",
-                    require_metrics=bool(config.scaffold_require_metrics),
-                    command_hints=hints.commands,
-                ),
-                log_path=log_path,
-                iter_idx=0,
-                fsm_state="S0_SCAFFOLD",
-                event="scaffold_contract",
-            )
-            write_text(artifacts_run_dir / "scaffold_agent_result.txt", tail(res.assistant_text or "", 20000) + "\n")
-        except Exception as e:
-            scaffold_err = tail(str(e), 4000)
-            write_text(artifacts_run_dir / "scaffold_agent_error.txt", scaffold_err + "\n")
-            append_jsonl(
-                log_path,
-                {
-                    "ts": now_iso(),
-                    "iter_idx": 0,
-                    "fsm_state": "S0_SCAFFOLD",
-                    "event": "scaffold_contract_error",
-                    "error": tail(str(e), 2000),
-                },
-            )
-
-        # Fallback: if the model forgot tool calls and pipeline.yml is still missing, write a minimal pipeline.yml
-        # referencing `.aider_fsm/stages/*.sh` so downstream repair can proceed.
+        tool_trace: list[dict[str, Any]] = []
+        contract_before = snapshot_contract_files(repo)
+        runner_written_paths: set[str] = set()
+        scaffold_attempts = max(1, int(config.opencode_retry_attempts or 0) + 1)
         pipeline_path = (repo / "pipeline.yml").resolve()
-        if not pipeline_path.exists():
+        last_failure_reason = ""
+
+        def _write_scaffold_provenance() -> None:
             try:
-                _write_fallback_pipeline_yml(repo, pipeline_rel="pipeline.yml", require_metrics=bool(config.scaffold_require_metrics))
-                write_text(artifacts_run_dir / "scaffold_fallback_used.txt", "wrote_fallback_pipeline_yml\n")
+                report = build_contract_provenance_report(
+                    repo=repo,
+                    purpose="scaffold_contract",
+                    strict_opencode=bool(config.strict_opencode),
+                    before=contract_before,
+                    after=snapshot_contract_files(repo),
+                    tool_trace=tool_trace,
+                    runner_written_paths=runner_written_paths,
+                )
+                dump_provenance(artifacts_run_dir / "scaffold_provenance.json", report)
             except Exception:
                 pass
 
-        # Validate pipeline parseability (and minimal contract requirements). If missing/invalid, fail fast.
         pipeline_ok = False
-        pipeline_validation_reason = ""
-        if pipeline_path.exists():
+        hints = suggest_contract_hints(repo)
+        if hints.commands:
+            write_text(artifacts_run_dir / "scaffold_command_hints.txt", "\n".join(hints.commands) + "\n")
+        for attempt in range(1, scaffold_attempts + 1):
+            try:
+                scaffold_agent = _ensure_agent(pipeline_rel_override="pipeline.yml")
+                if attempt <= 1:
+                    prompt = make_scaffold_contract_prompt(
+                        repo,
+                        pipeline_rel="pipeline.yml",
+                        require_metrics=bool(config.scaffold_require_metrics),
+                        command_hints=hints.commands,
+                    )
+                else:
+                    prompt = make_scaffold_contract_retry_prompt(
+                        repo,
+                        pipeline_rel="pipeline.yml",
+                        require_metrics=bool(config.scaffold_require_metrics),
+                        attempt=attempt,
+                        max_attempts=scaffold_attempts,
+                        previous_failure=last_failure_reason or scaffold_err,
+                        command_hints=hints.commands,
+                    )
+                res = _agent_run(
+                    scaffold_agent,
+                    prompt,
+                    log_path=log_path,
+                    iter_idx=max(0, attempt - 1),
+                    fsm_state="S0_SCAFFOLD",
+                    event="scaffold_contract",
+                )
+                attempt_trace = [dict(x) for x in (res.tool_trace or []) if isinstance(x, dict)]
+                for row in attempt_trace:
+                    row["attempt"] = int(attempt)
+                tool_trace.extend(attempt_trace)
+                write_text(
+                    artifacts_run_dir / f"scaffold_agent_result_attempt_{attempt:02d}.txt",
+                    tail(res.assistant_text or "", 20000) + "\n",
+                )
+                write_text(artifacts_run_dir / "scaffold_agent_result.txt", tail(res.assistant_text or "", 20000) + "\n")
+            except Exception as e:
+                scaffold_err = tail(str(e), 4000)
+                write_text(artifacts_run_dir / f"scaffold_agent_error_attempt_{attempt:02d}.txt", scaffold_err + "\n")
+                write_text(artifacts_run_dir / "scaffold_agent_error.txt", scaffold_err + "\n")
+                append_jsonl(
+                    log_path,
+                    {
+                        "ts": now_iso(),
+                        "iter_idx": max(0, attempt - 1),
+                        "fsm_state": "S0_SCAFFOLD",
+                        "event": "scaffold_contract_error",
+                        "error": tail(str(e), 2000),
+                    },
+                )
+
+            if not pipeline_path.exists():
+                transport_reason = _classify_opencode_transport_error(scaffold_err)
+                if transport_reason:
+                    last_failure_reason = f"missing_pipeline_yml; {transport_reason}"
+                else:
+                    last_failure_reason = "missing_pipeline_yml"
+                continue
+
             try:
                 parsed = load_pipeline_spec(pipeline_path)
-                missing_fields = validate_scaffolded_pipeline(parsed, require_metrics=bool(config.scaffold_require_metrics))
-                missing_files = validate_scaffolded_files(repo)
-                if missing_fields or missing_files:
-                    pipeline_validation_reason = "missing_scaffold_requirements"
+                report = validate_scaffold_contract(
+                    repo,
+                    pipeline=parsed,
+                    require_metrics=bool(config.scaffold_require_metrics),
+                )
+                if not report.ok:
+                    last_failure_reason = "missing_scaffold_requirements: " + "; ".join(report.errors or [])
+                    write_text(
+                        artifacts_run_dir / f"scaffold_agent_pipeline_validation_error_attempt_{attempt:02d}.txt",
+                        "Pipeline is parseable but does not meet scaffold requirements:\n"
+                        + "\n".join([f"- {x}" for x in report.errors])
+                        + ("\n" if report.errors else "")
+                        + (
+                            "Non-fatal warnings:\n"
+                            + "\n".join([f"- {x}" for x in (report.warnings or [])])
+                            + ("\n" if report.warnings else "")
+                            if report.warnings
+                            else ""
+                        ),
+                    )
                     write_text(
                         artifacts_run_dir / "scaffold_agent_pipeline_validation_error.txt",
                         "Pipeline is parseable but does not meet scaffold requirements:\n"
-                        + "\n".join([f"- {x}" for x in missing_fields])
-                        + ("\n" if missing_fields else "")
-                        + "\n".join([f"- missing_file: {x}" for x in missing_files])
-                        + ("\n" if missing_files else ""),
+                        + "\n".join([f"- {x}" for x in report.errors])
+                        + ("\n" if report.errors else ""),
                     )
                     append_jsonl(
                         log_path,
                         {
                             "ts": now_iso(),
-                            "iter_idx": 0,
+                            "iter_idx": max(0, attempt - 1),
                             "fsm_state": "S0_SCAFFOLD",
                             "event": "scaffold_agent_pipeline_validation_error",
                             "pipeline_path": str(pipeline_path),
-                            "missing_fields": missing_fields,
-                            "missing_files": missing_files,
+                            "errors": list(report.errors),
+                            "warnings": list(report.warnings or []),
                         },
                     )
-                else:
-                    pipeline_ok = True
+                    continue
+
+                pipeline_ok = True
+                if report.warnings:
+                    write_text(
+                        artifacts_run_dir / "scaffold_agent_pipeline_validation_warning.txt",
+                        "\n".join([f"- {x}" for x in report.warnings]) + "\n",
+                    )
+                    append_jsonl(
+                        log_path,
+                        {
+                            "ts": now_iso(),
+                            "iter_idx": max(0, attempt - 1),
+                            "fsm_state": "S0_SCAFFOLD",
+                            "event": "scaffold_agent_pipeline_validation_warning",
+                            "pipeline_path": str(pipeline_path),
+                            "warnings": list(report.warnings),
+                        },
+                    )
+                break
             except Exception as e:
+                last_failure_reason = f"pipeline_parse_error: {tail(str(e), 1000)}"
+                write_text(
+                    artifacts_run_dir / f"scaffold_agent_pipeline_parse_error_attempt_{attempt:02d}.txt",
+                    tail(str(e), 4000) + "\n",
+                )
                 write_text(
                     artifacts_run_dir / "scaffold_agent_pipeline_parse_error.txt",
                     tail(str(e), 4000) + "\n",
@@ -327,21 +440,23 @@ def run(config: RunnerConfig, *, agent: AgentClient | None = None) -> int:
                     log_path,
                     {
                         "ts": now_iso(),
-                        "iter_idx": 0,
+                        "iter_idx": max(0, attempt - 1),
                         "fsm_state": "S0_SCAFFOLD",
                         "event": "scaffold_agent_pipeline_parse_error",
                         "pipeline_path": str(pipeline_path),
                         "error": tail(str(e), 2000),
                     },
                 )
+        _write_scaffold_provenance()
         if not pipeline_ok:
-            reason = "missing_pipeline_yml"
-            if pipeline_path.exists():
-                reason = "invalid_or_incomplete_pipeline_yml"
-            if pipeline_validation_reason:
-                reason = f"{reason}; {pipeline_validation_reason}"
+            root_cause = _classify_opencode_transport_error(scaffold_err)
+            reason = "missing_or_invalid_pipeline_yml"
+            if last_failure_reason:
+                reason = f"{reason}; {last_failure_reason}"
             if scaffold_err:
                 reason = f"{reason}; scaffold_contract_error"
+            if root_cause:
+                reason = f"{reason}; {root_cause}"
             if pipeline_path.exists():
                 write_text(artifacts_run_dir / "scaffold_agent_pipeline.yml", read_text_if_exists(pipeline_path))
             write_text(

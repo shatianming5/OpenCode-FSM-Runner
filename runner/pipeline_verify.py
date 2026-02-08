@@ -141,6 +141,43 @@ def _validate_hints_used(repo: Path, *, expected_anchors: list[str]) -> tuple[bo
     return True, "ok"
 
 
+def _validate_hints_run(repo: Path) -> tuple[bool, str]:
+    """Validate `.aider_fsm/hints_run.json` when a real (parseable) score is required."""
+    repo = Path(repo).resolve()
+    path = (repo / ".aider_fsm" / "hints_run.json").resolve()
+    if not path.exists():
+        return False, f"missing_hints_run_json: {path}"
+    data, err = _read_json(path)
+    if err:
+        return False, f"hints_run_json_{err}"
+    assert isinstance(data, dict)  # _read_json guarantees dict on success
+
+    if data.get("ok") is not True:
+        return False, "hints_run.ok_not_true"
+
+    chosen = data.get("chosen_command")
+    if not isinstance(chosen, str) or not chosen.strip():
+        return False, "hints_run.chosen_command_missing_or_empty"
+
+    executed = data.get("executed_attempts")
+    try:
+        executed_i = int(executed)
+    except Exception:
+        executed_i = 0
+    if executed_i <= 0:
+        return False, "hints_run.executed_attempts_not_positive"
+
+    score = data.get("score")
+    try:
+        score_f = float(score)
+    except Exception:
+        return False, "hints_run.score_invalid"
+    if score_f < 0.0 or score_f > 1.0:
+        return False, "hints_run.score_out_of_range"
+
+    return True, "ok"
+
+
 def _dump_kubectl(
     out_dir: Path,
     repo: Path,
@@ -345,10 +382,17 @@ def run_pipeline_verification(
     runner_root = Path(__file__).resolve().parents[1]
     env_base.setdefault("AIDER_FSM_RUNNER_ROOT", str(runner_root))
     env_base.setdefault("AIDER_FSM_PYTHON", sys.executable)
+    # Ensure the runner repo root is first on PYTHONPATH.
+    #
+    # Why: some environments (or target repos) may already have a `.../runner` path
+    # earlier on sys.path, which can cause Python to import `runner/runner.py` as a
+    # top-level module named `runner` (breaking relative imports). Prepending the
+    # runner repo root avoids that collision.
     existing_pp = str(env_base.get("PYTHONPATH") or "")
     parts = [p for p in existing_pp.split(os.pathsep) if p]
-    if str(runner_root) not in parts:
-        env_base["PYTHONPATH"] = str(runner_root) + (os.pathsep + existing_pp if existing_pp else "")
+    root_s = str(runner_root)
+    parts = [p for p in parts if p != root_s]
+    env_base["PYTHONPATH"] = root_s + (os.pathsep + os.pathsep.join(parts) if parts else "")
 
     # Generic timeout overrides (no benchmark-specific logic).
     #
@@ -663,6 +707,26 @@ def run_pipeline_verification(
                         evaluation=eval_res,
                         metrics_errors=metrics_errors,
                     )
+                if _is_truthy(eval_env.get("AIDER_FSM_REQUIRE_REAL_SCORE")):
+                    ok_run, run_reason = _validate_hints_run(repo)
+                    if not ok_run:
+                        try:
+                            write_text(artifacts_dir / "hints_run_requirement_error.txt", run_reason + "\n")
+                        except Exception:
+                            pass
+                        metrics_errors.append(f"evaluation.hints_run_requirement_failed: {run_reason}")
+                        failed_stage = "evaluation"
+                        return VerificationResult(
+                            ok=False,
+                            failed_stage=failed_stage,
+                            auth=auth_res,
+                            tests=tests_res,
+                            deploy_setup=deploy_setup_res,
+                            deploy_health=deploy_health_res,
+                            rollout=rollout_res,
+                            evaluation=eval_res,
+                            metrics_errors=metrics_errors,
+                        )
 
         if pipeline and pipeline.evaluation_metrics_path:
             mpath = Path(pipeline.evaluation_metrics_path).expanduser()

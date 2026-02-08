@@ -40,6 +40,19 @@ class BootstrapSpec:
             object.__setattr__(self, "env", {})
 
 
+@dataclass(frozen=True)
+class BootstrapLoadResult:
+    """Structured bootstrap parse output with non-fatal normalization warnings."""
+
+    spec: BootstrapSpec
+    raw: str
+    warnings: list[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.warnings is None:
+            object.__setattr__(self, "warnings", [])
+
+
 _VAR_BRACE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _VAR_BARE_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 _DOLLAR_PLACEHOLDER = "\x00DOLLAR\x00"
@@ -121,11 +134,96 @@ def _redact_env(env: dict[str, str]) -> dict[str, str]:
     return out
 
 
-def load_bootstrap_spec(path: Path) -> tuple[BootstrapSpec, str]:
-    """中文说明：
-    - 含义：读取并解析 `.aider_fsm/bootstrap.yml`（v1），返回 (BootstrapSpec, raw_text)。
-    - 内容：校验 version/cmds/env/workdir 等字段类型；支持 `steps` 作为 `cmds` 别名；返回 raw 用于 artifacts 固化。
-    - 可简略：可能（薄封装；但集中校验便于维护与测试）。
+def _as_optional_int(raw: Any, *, field: str, min_value: int | None = None) -> int | None:
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    try:
+        n = int(s)
+    except Exception as e:
+        raise ValueError(f"bootstrap.{field} must be an integer") from e
+    if min_value is not None and n < int(min_value):
+        raise ValueError(f"bootstrap.{field} must be >= {int(min_value)}")
+    return n
+
+
+def _coerce_cmds(raw: Any, *, field_name: str, warnings: list[str]) -> list[str]:
+    out: list[str] = []
+
+    if raw is None:
+        return out
+
+    if isinstance(raw, str):
+        s = raw.strip()
+        if s:
+            warnings.append(f"bootstrap.{field_name}_coerced_from_string")
+            return [s]
+        return out
+
+    if isinstance(raw, dict):
+        cmd = raw.get("cmd")
+        if cmd is None:
+            cmd = raw.get("run")
+        if cmd is None:
+            cmd = raw.get("command")
+        if isinstance(cmd, str) and cmd.strip():
+            warnings.append(f"bootstrap.{field_name}_mapping_coerced_to_single_cmd")
+            return [cmd.strip()]
+        raise ValueError(
+            f"bootstrap.{field_name} mapping must contain one of keys: cmd, run, command "
+            "(with non-empty string value)"
+        )
+
+    if not isinstance(raw, list):
+        raise ValueError(f"bootstrap.{field_name} must be a list of non-empty strings")
+
+    for i, item in enumerate(raw):
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip())
+            continue
+        if isinstance(item, dict):
+            cmd = item.get("cmd")
+            if cmd is None:
+                cmd = item.get("run")
+            if cmd is None:
+                cmd = item.get("command")
+            if isinstance(cmd, str) and cmd.strip():
+                out.append(cmd.strip())
+                warnings.append(f"bootstrap.{field_name}[{i}]_mapping_coerced_via_run")
+                continue
+        raise ValueError(
+            f"bootstrap.{field_name}[{i}] must be a non-empty string "
+            "or mapping with cmd/run/command"
+        )
+    return out
+
+
+def _normalize_bootstrap_mapping(data: dict[str, Any], *, warnings: list[str]) -> dict[str, Any]:
+    out = dict(data or {})
+    boot = out.get("boot")
+    if isinstance(boot, dict):
+        top_level_keys = {"cmds", "steps", "env", "workdir", "cwd", "timeout_seconds", "timeout", "retries", "retry"}
+        has_top_level_spec = any(k in out for k in top_level_keys)
+        if not has_top_level_spec:
+            merged = dict(boot)
+            for k, v in out.items():
+                if k == "boot":
+                    continue
+                merged[k] = v
+            out = merged
+            warnings.append("bootstrap.boot_mapping_unwrapped")
+        else:
+            warnings.append("bootstrap.boot_mapping_ignored_due_to_top_level_fields")
+    return out
+
+
+def load_bootstrap_spec_with_diagnostics(path: Path) -> BootstrapLoadResult:
+    """Load bootstrap.yml and tolerate common scaffold formatting variants.
+
+    This keeps parsing strict enough for safety while handling typical agent outputs
+    (e.g. `boot:` wrapper, `steps` alias, mapping-style step items).
     """
     try:
         import yaml  # type: ignore
@@ -139,19 +237,20 @@ def load_bootstrap_spec(path: Path) -> tuple[BootstrapSpec, str]:
     if not isinstance(data, dict):
         raise ValueError("bootstrap.yml must be a YAML mapping (dict) at the top level")
 
-    version = int(data.get("version") or 1)
+    warnings: list[str] = []
+    obj = _normalize_bootstrap_mapping(data, warnings=warnings)
+
+    version = int(obj.get("version") or 1)
     if version != 1:
         raise ValueError(f"unsupported bootstrap version: {version}")
 
-    cmds = data.get("cmds")
-    if cmds is None and data.get("steps") is not None:
-        cmds = data.get("steps")
-    if cmds is None:
-        cmds = []
-    if not isinstance(cmds, list) or not all(isinstance(x, str) and x.strip() for x in cmds):
-        raise ValueError("bootstrap.cmds must be a list of non-empty strings")
+    cmds_src = obj.get("cmds")
+    if cmds_src is None and obj.get("steps") is not None:
+        cmds_src = obj.get("steps")
+        warnings.append("bootstrap.steps_alias_used")
+    cmds = _coerce_cmds(cmds_src, field_name="cmds", warnings=warnings)
 
-    env = data.get("env") or {}
+    env = obj.get("env") or {}
     if env is None:
         env = {}
     if not isinstance(env, dict):
@@ -165,21 +264,45 @@ def load_bootstrap_spec(path: Path) -> tuple[BootstrapSpec, str]:
             continue
         env_out[ks] = "" if v is None else str(v)
 
-    workdir = str(data.get("workdir")).strip() if data.get("workdir") else None
-    timeout_seconds = int(data.get("timeout_seconds")) if data.get("timeout_seconds") else None
-    retries = int(data.get("retries") or 0)
+    workdir_raw = obj.get("workdir")
+    if workdir_raw is None and obj.get("cwd") is not None:
+        workdir_raw = obj.get("cwd")
+        warnings.append("bootstrap.cwd_alias_used")
+    workdir = str(workdir_raw).strip() if workdir_raw else None
 
-    return (
-        BootstrapSpec(
-            version=version,
-            cmds=[c.strip() for c in cmds if c.strip()],
-            env=env_out,
-            workdir=workdir,
-            timeout_seconds=timeout_seconds,
-            retries=retries,
-        ),
-        raw,
+    timeout_raw = obj.get("timeout_seconds")
+    if timeout_raw is None and obj.get("timeout") is not None:
+        timeout_raw = obj.get("timeout")
+        warnings.append("bootstrap.timeout_alias_used")
+    timeout_seconds = _as_optional_int(timeout_raw, field="timeout_seconds", min_value=1)
+
+    retries_raw = obj.get("retries")
+    if retries_raw is None and obj.get("retry") is not None:
+        retries_raw = obj.get("retry")
+        warnings.append("bootstrap.retry_alias_used")
+    retries = _as_optional_int(retries_raw, field="retries", min_value=0)
+    if retries is None:
+        retries = 0
+
+    spec = BootstrapSpec(
+        version=version,
+        cmds=[c.strip() for c in cmds if c.strip()],
+        env=env_out,
+        workdir=workdir,
+        timeout_seconds=timeout_seconds,
+        retries=int(retries),
     )
+    return BootstrapLoadResult(spec=spec, raw=raw, warnings=warnings)
+
+
+def load_bootstrap_spec(path: Path) -> tuple[BootstrapSpec, str]:
+    """中文说明：
+    - 含义：读取并解析 `.aider_fsm/bootstrap.yml`（v1），返回 (BootstrapSpec, raw_text)。
+    - 内容：校验 version/cmds/env/workdir 等字段类型；支持 `steps` 作为 `cmds` 别名；返回 raw 用于 artifacts 固化。
+    - 可简略：可能（薄封装；但集中校验便于维护与测试）。
+    """
+    loaded = load_bootstrap_spec_with_diagnostics(path)
+    return loaded.spec, loaded.raw
 
 
 def run_bootstrap(
@@ -203,7 +326,10 @@ def run_bootstrap(
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        spec, raw = load_bootstrap_spec(bootstrap_path)
+        loaded = load_bootstrap_spec_with_diagnostics(bootstrap_path)
+        spec, raw = loaded.spec, loaded.raw
+        if loaded.warnings:
+            write_json(artifacts_dir / "bootstrap_parse_warnings.json", {"warnings": list(loaded.warnings)})
     except Exception as e:
         res = CmdResult(cmd=f"parse {bootstrap_path}", rc=2, stdout="", stderr=str(e), timed_out=False)
         write_cmd_artifacts(artifacts_dir, "bootstrap_parse", res)

@@ -3,10 +3,22 @@
 ## Matrix
 | ID | Name | Config/Script | Command | Metrics | Artifacts | Smoke | Full |
 |---|---|---|---|---|---|---|---|
-| Exp-001 | HF dataset contract run (GSM8K link) | `examples/verify_suite_single_file.py` | `python3 examples/verify_suite_single_file.py --targets https://huggingface.co/datasets/openai/gsm8k --llm deepseek-v3.2 --eval-mode smoke --require-samples --repair-iters 3` | `metrics.ok`, `metrics.score` | `.aider_fsm/artifacts/<run_id>/env_api/**`, `.aider_fsm/metrics.json`, `.aider_fsm/rollout.json` | [ ] | [ ] |
-| Exp-002 | EvalPlus repo contract run | `examples/verify_suite_single_file.py` | `python3 examples/verify_suite_single_file.py --targets https://github.com/evalplus/evalplus --llm deepseek-v3.2 --eval-mode smoke --require-samples --repair-iters 3` | `metrics.ok`, `metrics.score` | `.aider_fsm/artifacts/<run_id>/env_api/**`, `.aider_fsm/metrics.json`, `.aider_fsm/rollout.json` | [ ] | [ ] |
-| Exp-003 | MiniWoB++ repo contract run | `examples/verify_suite_single_file.py` | `python3 examples/verify_suite_single_file.py --targets https://github.com/Farama-Foundation/miniwob-plusplus --llm deepseek-v3.2 --eval-mode smoke --require-samples --repair-iters 3` | `metrics.ok`, `metrics.score` | `.aider_fsm/artifacts/<run_id>/env_api/**`, `.aider_fsm/metrics.json`, `.aider_fsm/rollout.json` | [ ] | [ ] |
-| Exp-004 | 0.5B segment training + ordered target sweep | `runner/ml/train_and_benchmark.py` | `python3 -m runner.ml.train_and_benchmark --base-model Qwen/Qwen2.5-0.5B-Instruct --out-root /tmp/aider_train_runs --targets-file benchmarks.txt --segments 2 --steps-per-segment 8 --opencode-model opencode/gpt-5-nano --require-samples --full-after-last` | per-target `rollout_ok`, `evaluation_ok`, `metrics.ok`, `metrics.score` | `/tmp/aider_train_runs/train_and_benchmark_summary.json`, `/tmp/aider_train_runs/seg_*/smoke/*`, `/tmp/aider_train_runs/seg_*/full/*` | [ ] | [ ] |
+| Exp-001 | HF dataset contract run (GSM8K link) | `examples/verify_suite_single_file.py` | `python3 examples/verify_suite_single_file.py --targets https://huggingface.co/datasets/openai/gsm8k --llm deepseek-v3.2 --eval-mode smoke --require-samples --repair-iters 3` | `metrics.ok`, `metrics.score` | `.aider_fsm/artifacts/<run_id>/env_api/**`, `.aider_fsm/metrics.json`, `.aider_fsm/rollout.json` | [x] | [x] |
+| Exp-002 | EvalPlus repo contract run | `examples/verify_suite_single_file.py` | `python3 examples/verify_suite_single_file.py --targets https://github.com/evalplus/evalplus --llm deepseek-v3.2 --eval-mode smoke --require-samples --repair-iters 3` | `metrics.ok`, `metrics.score` | `.aider_fsm/artifacts/<run_id>/env_api/**`, `.aider_fsm/metrics.json`, `.aider_fsm/rollout.json` | [x] | [x] |
+| Exp-003 | MiniWoB++ repo contract run | `examples/verify_suite_single_file.py` | `python3 examples/verify_suite_single_file.py --targets https://github.com/Farama-Foundation/miniwob-plusplus --llm deepseek-v3.2 --eval-mode smoke --require-samples --repair-iters 3` | `metrics.ok`, `metrics.score` | `.aider_fsm/artifacts/<run_id>/env_api/**`, `.aider_fsm/metrics.json`, `.aider_fsm/rollout.json` | [x] | [x] |
+| Exp-004 | 0.5B segment training + ordered target sweep | `runner/ml/train_and_benchmark.py` | `python3 -m runner.ml.train_and_benchmark --base-model Qwen/Qwen2.5-0.5B-Instruct --out-root /data/tiansha/aider_train_runs --targets-file benchmarks.txt --segments 2 --steps-per-segment 8 --opencode-model opencode/gpt-5-nano --require-samples --full-after-last` | per-target `rollout_ok`, `evaluation_ok`, `metrics.ok`, `metrics.score` | `/data/tiansha/aider_train_runs/train_and_benchmark_summary.json`, `/data/tiansha/aider_train_runs/seg_*/smoke/*`, `/data/tiansha/aider_train_runs/seg_*/full/*` | [x] | [x] |
+
+## Latest Passing Runs (2026-02-06 UTC)
+- Exp-001 smoke/full: passed (`.rd_queue/results/Exp-001-smoke.json`, `.rd_queue/results/Exp-001-full.json`), full metrics `ok=true`, `score=1.0`, `counts.samples=64`.
+- Exp-002 smoke/full: passed (`.rd_queue/results/Exp-002-smoke.json`, `.rd_queue/results/Exp-002-full.json`), full metrics `ok=true`, `score=1.0`.
+- Exp-003 smoke/full: passed (`.rd_queue/results/Exp-003-smoke.json`, `.rd_queue/results/Exp-003-full.json`), full metrics `ok=true`, `score=1.0`.
+- Exp-004 full: passed (`.rd_queue/results/Exp-004-full.json`), summary at `/data/tiansha/aider_train_runs/train_and_benchmark_summary.json`.
+- Exp-004 segment status:
+  - segment 0 train: `ok=true`, `steps=8`, `last_loss=3.910231351852417`
+  - segment 1 train: `ok=true`, `steps=8`, `last_loss=2.9190423488616943`
+  - segment 0 smoke targets (gsm8k/evalplus/miniwob-plusplus): all `rollout_ok=true`, `evaluation_ok=true`, `metrics.ok=true`, `metrics.score=1.0`
+  - segment 1 smoke targets (gsm8k/evalplus/miniwob-plusplus): all `rollout_ok=true`, `evaluation_ok=true`, `metrics.ok=true`, `metrics.score=1.0`
+  - segment 1 full targets (gsm8k/evalplus/miniwob-plusplus): all `rollout_ok=true`, `evaluation_ok=true`, `metrics.ok=true`, `metrics.score=1.0`
 
 ## Details
 
@@ -47,10 +59,10 @@
 - Goal: During training, run ordered rollout+evaluation for each target after every segment.
 - Baseline: `runner/ml/train_and_benchmark.py` now uses Method-2 calls (`env.setup`, `session.rollout`, `session.evaluate`, `env.teardown`) only.
 - Command:
-  - Smoke per segment: `python3 -m runner.ml.train_and_benchmark --base-model Qwen/Qwen2.5-0.5B-Instruct --out-root /tmp/aider_train_runs --targets-file benchmarks.txt --segments 2 --steps-per-segment 8 --require-samples`
+  - Smoke per segment: `python3 -m runner.ml.train_and_benchmark --base-model Qwen/Qwen2.5-0.5B-Instruct --out-root /data/tiansha/aider_train_runs --targets-file benchmarks.txt --segments 2 --steps-per-segment 8 --require-samples`
   - Full on final segment: add `--full-after-last`.
 - Resources: GPU recommended for training; benchmark runs depend on target contracts.
-- Outputs: `/tmp/aider_train_runs/train_and_benchmark_summary.json` with ordered per-segment/per-target status.
+- Outputs: `/data/tiansha/aider_train_runs/train_and_benchmark_summary.json` with ordered per-segment/per-target status.
 - Required metrics:
   - For each target run: `rollout_ok=true`, `evaluation_ok=true`, `metrics.ok=true`.
   - Run order must match `benchmarks.txt` for every segment.

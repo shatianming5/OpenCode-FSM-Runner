@@ -101,6 +101,26 @@ def _ensure_openai_v1_base(base_url: str) -> str:
     return b if b.endswith("/v1") else b + "/v1"
 
 
+def _inject_openai_base_compat(overrides: dict[str, str]) -> None:
+    """Keep OpenAI-compatible base URL aliases in sync for downstream tools.
+
+    Some downstream libraries read `OPENAI_BASE_URL`, while others read
+    `OPENAI_API_BASE`. We normalize to include both keys when either is present
+    in env overrides or inherited process env.
+    """
+    base = (
+        str(overrides.get("OPENAI_BASE_URL") or "").strip()
+        or str(overrides.get("OPENAI_API_BASE") or "").strip()
+        or str(os.environ.get("OPENAI_BASE_URL") or "").strip()
+        or str(os.environ.get("OPENAI_API_BASE") or "").strip()
+    )
+    if not base:
+        return
+    base = _ensure_openai_v1_base(base)
+    overrides.setdefault("OPENAI_BASE_URL", base)
+    overrides.setdefault("OPENAI_API_BASE", base)
+
+
 def _runtime_openai_config(runtime_env_path: Path) -> tuple[str | None, str | None]:
     """Best-effort: derive (OPENAI_API_BASE, OPENAI_MODEL) from runtime_env.json."""
     p = Path(runtime_env_path).expanduser().resolve()
@@ -409,6 +429,10 @@ class EnvSession:
     require_metrics: bool
     command_hints: list[str]
     hint_anchors: list[str]
+    opencode_retry_attempts: int = 2
+    opencode_retry_backoff_seconds: float = 2.0
+    opencode_context_length: int | None = None
+    opencode_max_prompt_chars: int | None = None
     audit: str = "on"  # on|off|warn-only
     runtime_env_path: Path | None = None
     llm_kind: str = ""
@@ -450,6 +474,7 @@ class EnvSession:
 
     def _base_overrides(self, *, mode: str, extra: dict[str, str] | None) -> dict[str, str]:
         out = dict(extra or {})
+        _inject_openai_base_compat(out)
         out.setdefault("AIDER_FSM_RUN_ID", str(self.run_id))
         out.setdefault("AIDER_EVAL_MODE", str(mode or "smoke").strip() or "smoke")
         if self.command_hints:
@@ -678,12 +703,18 @@ class EnvSession:
                 opencode_url=str(self.opencode_url or ""),
                 unattended=str(self.unattended or "strict"),
                 artifacts_dir=(run_root / f"repair_{attempt+1:02d}").resolve(),
-                failed_stage="deploy",
+                failed_stage=str(getattr(res.verify, "failed_stage", "") or "deploy"),
                 deploy_artifacts_dir=deploy_dir,
                 rollout_eval_artifacts_dir=roll_eval_dir,
+                llm_kind=str(self.llm_kind or ""),
+                llm_model=str(self.llm_model or ""),
                 command_hints=self.command_hints,
                 extra_context="",
                 timeout_seconds=int(self.opencode_timeout_seconds or 300),
+                retry_attempts=int(self.opencode_retry_attempts or 0),
+                retry_backoff_seconds=float(self.opencode_retry_backoff_seconds or 0.0),
+                context_length=(int(self.opencode_context_length) if self.opencode_context_length is not None else None),
+                max_prompt_chars=(int(self.opencode_max_prompt_chars) if self.opencode_max_prompt_chars is not None else None),
             )
 
         return res  # pragma: no cover
@@ -729,12 +760,18 @@ class EnvSession:
                     opencode_url=str(self.opencode_url or ""),
                     unattended=str(self.unattended or "strict"),
                     artifacts_dir=(run_root / f"repair_{attempt+1:02d}").resolve(),
-                    failed_stage="deploy",
+                    failed_stage=str(getattr(deploy_res.verify, "failed_stage", "") or "deploy"),
                     deploy_artifacts_dir=deploy_dir,
                     rollout_eval_artifacts_dir=rollout_dir,
+                    llm_kind=str(self.llm_kind or ""),
+                    llm_model=str(self.llm_model or ""),
                     command_hints=self.command_hints,
                     extra_context="",
                     timeout_seconds=int(self.opencode_timeout_seconds or 300),
+                    retry_attempts=int(self.opencode_retry_attempts or 0),
+                    retry_backoff_seconds=float(self.opencode_retry_backoff_seconds or 0.0),
+                    context_length=(int(self.opencode_context_length) if self.opencode_context_length is not None else None),
+                    max_prompt_chars=(int(self.opencode_max_prompt_chars) if self.opencode_max_prompt_chars is not None else None),
                 )
                 continue
 
@@ -791,9 +828,15 @@ class EnvSession:
                 failed_stage="rollout",
                 deploy_artifacts_dir=deploy_dir,
                 rollout_eval_artifacts_dir=rollout_dir,
+                llm_kind=str(self.llm_kind or ""),
+                llm_model=str(self.llm_model or ""),
                 command_hints=self.command_hints,
                 extra_context=(contract_err or ("rollout_contract_invalid" if require_samples else "")),
                 timeout_seconds=int(self.opencode_timeout_seconds or 300),
+                retry_attempts=int(self.opencode_retry_attempts or 0),
+                retry_backoff_seconds=float(self.opencode_retry_backoff_seconds or 0.0),
+                context_length=(int(self.opencode_context_length) if self.opencode_context_length is not None else None),
+                max_prompt_chars=(int(self.opencode_max_prompt_chars) if self.opencode_max_prompt_chars is not None else None),
             )
 
         return rollout_res  # pragma: no cover
@@ -884,12 +927,18 @@ class EnvSession:
                         opencode_url=str(self.opencode_url or ""),
                         unattended=str(self.unattended or "strict"),
                         artifacts_dir=(run_root / f"repair_{attempt+1:02d}").resolve(),
-                        failed_stage="deploy",
+                        failed_stage=str(getattr(deploy_res.verify, "failed_stage", "") or "deploy"),
                         deploy_artifacts_dir=deploy_dir,
                         rollout_eval_artifacts_dir=roll_eval_dir,
+                        llm_kind=str(self.llm_kind or ""),
+                        llm_model=str(self.llm_model or ""),
                         command_hints=self.command_hints,
                         extra_context="",
                         timeout_seconds=int(self.opencode_timeout_seconds or 300),
+                        retry_attempts=int(self.opencode_retry_attempts or 0),
+                        retry_backoff_seconds=float(self.opencode_retry_backoff_seconds or 0.0),
+                        context_length=(int(self.opencode_context_length) if self.opencode_context_length is not None else None),
+                        max_prompt_chars=(int(self.opencode_max_prompt_chars) if self.opencode_max_prompt_chars is not None else None),
                     )
                     continue
 
@@ -946,9 +995,15 @@ class EnvSession:
                 failed_stage="evaluation",
                 deploy_artifacts_dir=deploy_dir if deploy_dir.exists() else run_root,
                 rollout_eval_artifacts_dir=roll_eval_dir if roll_eval_dir.exists() else eval_dir,
+                llm_kind=str(self.llm_kind or ""),
+                llm_model=str(self.llm_model or ""),
                 command_hints=self.command_hints,
                 extra_context=combined,
                 timeout_seconds=int(self.opencode_timeout_seconds or 300),
+                retry_attempts=int(self.opencode_retry_attempts or 0),
+                retry_backoff_seconds=float(self.opencode_retry_backoff_seconds or 0.0),
+                context_length=(int(self.opencode_context_length) if self.opencode_context_length is not None else None),
+                max_prompt_chars=(int(self.opencode_max_prompt_chars) if self.opencode_max_prompt_chars is not None else None),
             )
 
         return eval_res  # pragma: no cover
@@ -1012,12 +1067,16 @@ class EnvSession:
                     opencode_url=str(self.opencode_url or ""),
                     unattended=str(self.unattended or "strict"),
                     artifacts_dir=(run_root / f"repair_{attempt+1:02d}").resolve(),
-                    failed_stage="deploy",
+                    failed_stage=str(getattr(deploy_res.verify, "failed_stage", "") or "deploy"),
                     deploy_artifacts_dir=deploy_dir,
                     rollout_eval_artifacts_dir=roll_eval_dir,
                     command_hints=self.command_hints,
                     extra_context="",
                     timeout_seconds=int(self.opencode_timeout_seconds or 300),
+                    retry_attempts=int(self.opencode_retry_attempts or 0),
+                    retry_backoff_seconds=float(self.opencode_retry_backoff_seconds or 0.0),
+                    context_length=(int(self.opencode_context_length) if self.opencode_context_length is not None else None),
+                    max_prompt_chars=(int(self.opencode_max_prompt_chars) if self.opencode_max_prompt_chars is not None else None),
                 )
                 continue
 
@@ -1109,12 +1168,15 @@ class EnvSession:
                 failed_stage=("rollout" if not rollout_res.ok else "evaluation"),
                 deploy_artifacts_dir=deploy_dir,
                 rollout_eval_artifacts_dir=roll_eval_dir,
+                llm_kind=str(self.llm_kind or ""),
+                llm_model=str(self.llm_model or ""),
                 command_hints=self.command_hints,
-                extra_context=(
-                    combined
-                    or ("rollout_contract_invalid" if (require_samples and not rollout_res.ok) else "")
-                ),
+                extra_context=(combined or ("rollout_contract_invalid" if (require_samples and not rollout_res.ok) else "")),
                 timeout_seconds=int(self.opencode_timeout_seconds or 300),
+                retry_attempts=int(self.opencode_retry_attempts or 0),
+                retry_backoff_seconds=float(self.opencode_retry_backoff_seconds or 0.0),
+                context_length=(int(self.opencode_context_length) if self.opencode_context_length is not None else None),
+                max_prompt_chars=(int(self.opencode_max_prompt_chars) if self.opencode_max_prompt_chars is not None else None),
             )
 
         assert last_rollout is not None and last_eval is not None  # pragma: no cover
@@ -1156,8 +1218,14 @@ def setup(
     unattended: str = "strict",
     opencode_timeout_seconds: int = 300,
     opencode_repair_timeout_seconds: int | None = None,
+    opencode_retry_attempts: int = 2,
+    opencode_retry_backoff_seconds: float = 2.0,
+    opencode_session_recover_attempts: int | None = None,
+    opencode_session_recover_backoff_seconds: float | None = None,
+    opencode_context_length: int | None = None,
+    opencode_max_prompt_chars: int | None = None,
     opencode_bash: str = "restricted",
-    scaffold_opencode_bash: str = "full",
+    scaffold_opencode_bash: str = "restricted",
     strict_opencode: bool = True,
     artifacts_dir: Path | None = None,
 ) -> EnvSession:
@@ -1178,14 +1246,25 @@ def setup(
         model=str(opencode_model or ""),
         opencode_url=str(opencode_url or ""),
         opencode_timeout_seconds=int(opencode_timeout_seconds or 300),
+        opencode_retry_attempts=int(opencode_retry_attempts or 0),
+        opencode_retry_backoff_seconds=float(opencode_retry_backoff_seconds or 0.0),
+        opencode_session_recover_attempts=(
+            int(opencode_session_recover_attempts) if opencode_session_recover_attempts is not None else None
+        ),
+        opencode_session_recover_backoff_seconds=(
+            float(opencode_session_recover_backoff_seconds)
+            if opencode_session_recover_backoff_seconds is not None
+            else None
+        ),
+        opencode_context_length=(int(opencode_context_length) if opencode_context_length is not None else None),
+        opencode_max_prompt_chars=(int(opencode_max_prompt_chars) if opencode_max_prompt_chars is not None else None),
         opencode_bash=str(opencode_bash or "restricted"),
-        scaffold_opencode_bash=str(scaffold_opencode_bash or "full"),
+        scaffold_opencode_bash=str(scaffold_opencode_bash or "restricted"),
         unattended=str(unattended or "strict"),
         artifacts_dir=artifacts_dir,
-        # Always provide a robust stage-script starting point before OpenCode scaffolding.
-        # This is benchmark-agnostic and reduces common scaffolding mistakes (broken heredocs,
-        # writing rollout/metrics outputs into artifacts instead of `.aider_fsm/**`, etc.).
-        seed_stage_skeleton=True,
+        # Runner no longer prewrites/fallback-writes scaffold contracts.
+        # Keep these flags for compatibility/provenance labeling only.
+        seed_stage_skeleton=not bool(strict_opencode),
         write_fallback_pipeline_yml=not bool(strict_opencode),
     )
     hints = suggest_contract_hints(env_handle.repo)
@@ -1200,6 +1279,10 @@ def setup(
         require_metrics=bool(require_metrics),
         command_hints=list(hints.commands or []),
         hint_anchors=list(hints.anchors or []),
+        opencode_retry_attempts=int(opencode_retry_attempts or 0),
+        opencode_retry_backoff_seconds=float(opencode_retry_backoff_seconds or 0.0),
+        opencode_context_length=(int(opencode_context_length) if opencode_context_length is not None else None),
+        opencode_max_prompt_chars=(int(opencode_max_prompt_chars) if opencode_max_prompt_chars is not None else None),
         audit=str(audit or "on"),
     )
 

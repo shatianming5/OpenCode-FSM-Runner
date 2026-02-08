@@ -112,7 +112,7 @@ class _AgentWritesValidPipeline:
                         f"{shlex.quote(sys.executable)} - <<'PY'",
                         "import json, os, pathlib",
                         "pathlib.Path('.aider_fsm/metrics.json').write_text(",
-                        "  json.dumps({'ok': True, 'score': 1, 'run_id': os.getenv('AIDER_FSM_RUN_ID','')}, ensure_ascii=False) + '\\n'",
+                        "  json.dumps({'ok': True, 'score': 0.0, 'run_id': os.getenv('AIDER_FSM_RUN_ID','')}, ensure_ascii=False) + '\\n'",
                         ")",
                         "PY",
                         "",

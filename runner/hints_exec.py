@@ -88,6 +88,262 @@ _GHA_EXPR_RE = re.compile(r"\$\{\{\s*([^}]+)\s*\}\}")
 _PIPE_TO_BASH_RE = re.compile(r"(?i)\b(?:curl|wget)\b[^\n]*\|[^\n]*\bbash\b")
 _DOTTED_MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z0-9_.]+$")
 _DOCKER_LINE_RE = re.compile(r"(?im)^\s*docker\s+")
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_SHELL_BUILTINS = {
+    ":",
+    ".",
+    "alias",
+    "bg",
+    "break",
+    "builtin",
+    "cd",
+    "command",
+    "continue",
+    "dirs",
+    "echo",
+    "eval",
+    "exec",
+    "exit",
+    "export",
+    "false",
+    "fg",
+    "hash",
+    "help",
+    "history",
+    "jobs",
+    "kill",
+    "local",
+    "popd",
+    "printf",
+    "pushd",
+    "pwd",
+    "read",
+    "readonly",
+    "return",
+    "set",
+    "shift",
+    "source",
+    "test",
+    "times",
+    "trap",
+    "true",
+    "type",
+    "typeset",
+    "ulimit",
+    "umask",
+    "unalias",
+    "unset",
+    "wait",
+}
+
+
+def _canonical_base_url(url: str | None) -> str:
+    s = str(url or "").strip()
+    if not s:
+        return ""
+    s = s.rstrip("/")
+    if s.endswith("/v1"):
+        return s[: -len("/v1")]
+    return s
+
+
+def _first_command_line(cmd: str) -> str:
+    for raw in str(cmd or "").splitlines():
+        line = raw.strip()
+        if line:
+            return line
+    return ""
+
+
+def _extract_cli_flag_value(cmd: str, flag: str) -> str:
+    line = _first_command_line(cmd)
+    if not line:
+        return ""
+    try:
+        parts = shlex.split(line, posix=True)
+    except Exception:
+        return ""
+    i = 0
+    while i < len(parts):
+        tok = str(parts[i] or "")
+        if tok == flag and i + 1 < len(parts):
+            return str(parts[i + 1] or "").strip()
+        if tok.startswith(flag + "="):
+            return str(tok.split("=", 1)[1] or "").strip()
+        i += 1
+    return ""
+
+
+def _extract_cli_flag_value_any(cmd: str, flags: list[str]) -> str:
+    for flag in list(flags or []):
+        v = _extract_cli_flag_value(cmd, str(flag))
+        if v:
+            return v
+    return ""
+
+
+def _hint_backend(cmd: str) -> str:
+    backend = _extract_cli_flag_value(cmd, "--backend").strip().lower()
+    if backend:
+        return backend
+    line = _first_command_line(cmd).lower()
+    # Generic heuristic: evaluator-style CLIs with model+dataset often default to OpenAI backend.
+    if ".evaluate" in line and "--dataset" in line and "--model" in line:
+        return "openai"
+    return ""
+
+
+def _is_remote_openai_hint(cmd: str) -> bool:
+    return _hint_backend(cmd) == "openai"
+
+
+def _contains_openai_auth_error(text: str) -> bool:
+    low = str(text or "").lower()
+    needles = (
+        "invalid_api_key",
+        "incorrect api key provided",
+        "authenticationerror",
+        "error code: 401",
+        "status': 401",
+        "status: 401",
+    )
+    return any(n in low for n in needles)
+
+
+_SCORE_TOKEN_RE = re.compile(
+    r"(?i)\b(?P<key>pass@1\+?|accuracy|score)\b[^0-9%]{0,12}(?P<val>\d+(?:\.\d+)?)(?P<pct>\s*%)?"
+)
+
+
+def _normalize_score(value: float, *, had_percent: bool) -> float | None:
+    v = float(value)
+    if had_percent:
+        v = v / 100.0
+    # Heuristic: if a tool prints accuracy like "75" (meaning 75%), normalize to [0,1].
+    if v > 1.0 and v <= 100.0:
+        v = v / 100.0
+    if v < 0.0 or v > 1.0:
+        return None
+    return float(v)
+
+
+def _extract_score_from_text(text: str) -> tuple[float | None, str]:
+    """Best-effort score extraction from stdout/stderr (generic, benchmark-agnostic)."""
+    t = str(text or "")
+    # Strip ANSI sequences so regexes match more reliably.
+    t = re.sub(r"\x1b\[[0-9;]*m", "", t)
+    last: dict[str, tuple[float, bool]] = {}
+    for m in _SCORE_TOKEN_RE.finditer(t):
+        key = str(m.group("key") or "").strip().lower()
+        raw = str(m.group("val") or "").strip()
+        had_pct = bool((m.group("pct") or "").strip())
+        try:
+            val = float(raw)
+        except Exception:
+            continue
+        last[key] = (val, had_pct)
+    for key in ("pass@1", "pass@1+", "accuracy", "score"):
+        if key in last:
+            val, had_pct = last[key]
+            norm = _normalize_score(val, had_percent=had_pct)
+            if norm is not None:
+                return norm, f"text:{key}"
+    return None, "no_score_in_text"
+
+
+def _extract_score_from_json_obj(obj: object) -> tuple[float | None, str]:
+    """Best-effort score extraction from JSON-like objects."""
+
+    def rec(x: object) -> list[tuple[str, float]]:
+        out: list[tuple[str, float]] = []
+        if isinstance(x, dict):
+            for k, v in x.items():
+                kk = str(k or "").strip().lower()
+                if isinstance(v, (int, float)):
+                    out.append((kk, float(v)))
+                out.extend(rec(v))
+        elif isinstance(x, list):
+            for it in x:
+                out.extend(rec(it))
+        return out
+
+    pairs = rec(obj)
+    # Prefer pass@1, then accuracy, then score.
+    for needle in ("pass@1", "pass_at_1", "pass@1+", "pass_at_1_plus", "accuracy", "score"):
+        for k, v in reversed(pairs):
+            if needle in k:
+                norm = _normalize_score(v, had_percent=False)
+                if norm is not None:
+                    return norm, f"json:{needle}"
+    return None, "no_score_in_json"
+
+
+def _extract_score_from_json_file(path: Path) -> tuple[float | None, str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception as e:
+        return None, f"metrics_json_parse_failed:{e}"
+    return _extract_score_from_json_obj(data)
+
+
+def _candidate_metrics_paths(cmd: str, *, repo: Path, workdir: Path | None = None) -> list[Path]:
+    """Infer likely output paths for evaluation metrics from a hint command.
+
+    NOTE: some hint commands are executed from an artifacts workdir (not the repo root)
+    to avoid polluting the repo and to sidestep permission issues caused by docker-created
+    root-owned output directories. For relative paths, prefer resolving against that
+    execution workdir when provided.
+    """
+    repo = Path(repo).resolve()
+    base = Path(workdir).resolve() if workdir is not None else repo
+    out: list[Path] = []
+    out_dir = _extract_cli_flag_value_any(
+        cmd,
+        [
+            "--output-dir",
+            "--output_dir",
+            "--out-dir",
+            "--out_dir",
+            "--outdir",
+            "--results-dir",
+            "--results_dir",
+        ],
+    )
+    if out_dir:
+        p = Path(out_dir.strip())
+        if not p.is_absolute():
+            p = (base / p).resolve()
+        for name in ("metrics.json", "results.json", "summary.json"):
+            out.append((p / name).resolve())
+    # Also allow commands that directly write a metrics file.
+    out_path = _extract_cli_flag_value_any(cmd, ["--metrics", "--metrics-path", "--metrics_path"])
+    if out_path:
+        p = Path(out_path.strip())
+        if not p.is_absolute():
+            p = (base / p).resolve()
+        out.append(p.resolve())
+    return out
+
+
+def _hint_runtime_compatible(*, cmd: str, env: dict[str, str], strict_compat: bool) -> tuple[bool, str]:
+    if not strict_compat:
+        return True, "ok"
+    low = _first_command_line(cmd).lower()
+    if not low:
+        return False, "empty"
+
+    backend = _hint_backend(cmd)
+    llm_kind = str(env.get("AIDER_LLM_KIND") or "").strip().lower()
+    if llm_kind == "remote" and backend and backend != "openai":
+        if "--samples" not in low:
+            return False, f"backend_mismatch:{backend}"
+
+    runtime_base = _canonical_base_url(env.get("OPENAI_BASE_URL") or env.get("OPENAI_API_BASE"))
+    hinted_base = _canonical_base_url(_extract_cli_flag_value_any(cmd, ["--base-url", "--base_url"]))
+    if runtime_base and hinted_base and runtime_base != hinted_base:
+        return False, "base_url_mismatch"
+
+    return True, "ok"
 
 
 def normalize_hint_command(cmd: str, *, env: dict[str, str]) -> tuple[str, str | None]:
@@ -129,6 +385,7 @@ def normalize_hint_command(cmd: str, *, env: dict[str, str]) -> tuple[str, str |
         s2 = _replace_flag_value(s2, flag="--model", new_value=model)
     if base_url:
         s2 = _replace_flag_value(s2, flag="--base-url", new_value=base_url)
+        s2 = _replace_flag_value(s2, flag="--base_url", new_value=base_url)
 
     # Normalize whitespace but preserve newlines for multi-command scripts.
     s2 = re.sub(r"[ \t]+", " ", s2)
@@ -147,6 +404,18 @@ def normalize_hint_command(cmd: str, *, env: dict[str, str]) -> tuple[str, str |
     #
     # This is generic and avoids benchmark-specific hardcoding (common in README/CI).
     py = (env.get("AIDER_FSM_PYTHON") or env.get("PYTHON") or "python3").strip() or "python3"
+    # When the pipeline provides a repo-relative python path (e.g. `.aider_fsm/venv/bin/python`),
+    # make it absolute so hints can run from any working directory.
+    repo_root = str(env.get("AIDER_FSM_REPO_ROOT") or "").strip()
+    if repo_root and ("/" in py or py.startswith((".", "~"))):
+        try:
+            p = Path(py).expanduser()
+            if not p.is_absolute():
+                cand = (Path(repo_root).expanduser().resolve() / p).resolve()
+                if cand.exists():
+                    py = str(cand)
+        except Exception:
+            pass
 
     def _rewrite_line(line: str) -> str:
         try:
@@ -166,8 +435,88 @@ def normalize_hint_command(cmd: str, *, env: dict[str, str]) -> tuple[str, str |
 
     s2 = "\n".join([_rewrite_line(line) for line in s2.splitlines() if line.strip()]).strip()
 
+    def _looks_like_fire_cli(line: str) -> bool:
+        """Heuristic: console-script entrypoints like `pkg.subcmd` are often python-fire CLIs."""
+        try:
+            parts = shlex.split(line, posix=True)
+        except Exception:
+            return False
+        if not parts:
+            return False
+        # Skip leading env assignments, e.g. `FOO=1 cmd ...`.
+        i = 0
+        while i < len(parts) and _ENV_ASSIGN_RE.match(str(parts[i] or "").strip()):
+            i += 1
+        if i >= len(parts):
+            return False
+        first = str(parts[i] or "").strip()
+        if not first:
+            return False
+        if _DOTTED_MODULE_RE.fullmatch(first):
+            return True
+        # Also accept `python -m pkg.mod ...`.
+        if first in ("python", "python3", shlex.split(shlex.quote(py))[0]):
+            if i + 2 < len(parts) and str(parts[i + 1]) == "-m":
+                mod = str(parts[i + 2] or "").strip()
+                if _DOTTED_MODULE_RE.fullmatch(mod):
+                    return True
+        return False
+
+    def _maybe_normalize_fire_flag_aliases(line: str) -> str:
+        if not _looks_like_fire_cli(line):
+            return line
+        aliases = {
+            "--base-url": "--base_url",
+            "--n-samples": "--n_samples",
+            "--id-range": "--id_range",
+            "--i-just-wanna-run": "--i_just_wanna_run",
+            "--test-details": "--test_details",
+            "--base-only": "--base_only",
+            "--output-file": "--output_file",
+            "--min-time-limit": "--min_time_limit",
+            "--gt-time-limit-factor": "--gt_time_limit_factor",
+        }
+        out = line
+        for old, new in aliases.items():
+            out = out.replace(old, new)
+        return out
+
+    def _maybe_bound_openai_codegen_eval(line: str) -> str:
+        # Best-effort: bound expensive "codegen + evaluate" hint commands using AIDER_EVAL_LIMIT.
+        #
+        # Generic heuristic: commands that include `--backend openai` + `--model` + `--dataset`
+        # and do NOT include `--samples` are likely to trigger large numbers of API calls.
+        # For python-fire style CLIs, `--n_samples 1` is commonly supported.
+        #
+        # NOTE: we intentionally do NOT inject `--id_range` here. Some evaluators use
+        # `--id_range` only for code generation while still expecting a full dataset
+        # during evaluation, which can cause hard failures (e.g., "Missing problems in samples").
+        low = line.lower()
+        if "--samples" in low or " -s " in f" {low} ":
+            return line
+        if ("--backend openai" not in low) and ("--backend=openai" not in low):
+            return line
+        if "--model" not in low:
+            return line
+        if "--dataset" not in low:
+            return line
+        if (".evaluate" not in low) and (".codegen" not in low):
+            return line
+
+        parts = line.split()
+        has_n_samples = any(p.startswith("--n_samples") for p in parts)
+
+        suffix: list[str] = []
+        if not has_n_samples:
+            suffix.extend(["--n_samples", "1"])
+
+        return (line + (" " + " ".join(suffix) if suffix else "")).strip()
+
+    s2 = "\n".join([_maybe_bound_openai_codegen_eval(_maybe_normalize_fire_flag_aliases(line)) for line in s2.splitlines()])
+
     # If the command still contains bracket placeholders, it's likely not directly runnable.
-    if "[" in s2 and "]" in s2:
+    tmp = re.sub(r"\[\s*\d+\s*,\s*\d+\s*\]", "", s2)
+    if "[" in tmp and "]" in tmp:
         return s2, "unresolved_brackets"
     if "<" in s2 and ">" in s2:
         return s2, "unresolved_angle_placeholders"
@@ -193,6 +542,15 @@ class HintAttempt:
     stdout_tail: str
     stderr_tail: str
     skip_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class HintProbe:
+    raw: str
+    sanitized: str
+    ok: bool | None
+    reason: str
+    priority: int
 
 
 def _tail(text: str, n: int) -> str:
@@ -234,6 +592,156 @@ def _docker_available(*, env: dict[str, str]) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _extract_invoked_command(parts: list[str]) -> tuple[str, list[str]]:
+    i = 0
+    n = len(parts)
+    while i < n:
+        tok = str(parts[i] or "").strip()
+        if not tok:
+            i += 1
+            continue
+        if _ENV_ASSIGN_RE.match(tok):
+            i += 1
+            continue
+        if tok == "env":
+            i += 1
+            while i < n and _ENV_ASSIGN_RE.match(str(parts[i] or "").strip()):
+                i += 1
+            continue
+        return tok, parts[i:]
+    return "", []
+
+
+def _probe_hint_command(
+    *,
+    cmd: str,
+    repo: Path,
+    env: dict[str, str],
+    timeout_seconds: int,
+) -> tuple[bool | None, str]:
+    """Best-effort non-mutating probe for hint runnability."""
+    text = str(cmd or "").strip()
+    if not text:
+        return False, "empty"
+
+    first_line = ""
+    for raw in text.splitlines():
+        s = raw.strip()
+        if s:
+            first_line = s
+            break
+    if not first_line:
+        return False, "empty"
+
+    try:
+        parts = shlex.split(first_line, posix=True)
+    except Exception:
+        return None, "probe_shlex_failed"
+    if not parts:
+        return False, "empty"
+
+    invoked, tail_parts = _extract_invoked_command(parts)
+    if not invoked:
+        return None, "probe_no_invoked_command"
+
+    tok = str(invoked).strip()
+    if not tok:
+        return None, "probe_no_invoked_command"
+
+    # Shell wrappers and scripts are hard to probe cheaply without side effects.
+    if tok in ("bash", "sh", "zsh", "fish"):
+        return None, "probe_shell_wrapper"
+    if tok in _SHELL_BUILTINS:
+        return None, "probe_shell_builtin"
+    if "/" in tok or tok.startswith((".", "~")):
+        return True, "ok"
+
+    # Best-effort: if a hint references an explicit samples file, skip it early when missing.
+    # This avoids spending attempts on obviously failing commands (common in README snippets).
+    if tok != "docker":
+        samples = ""
+        i = 0
+        while i < len(parts):
+            t = str(parts[i] or "").strip()
+            if t in ("--samples", "-s") and i + 1 < len(parts):
+                samples = str(parts[i + 1] or "").strip()
+                break
+            if t.startswith("--samples="):
+                samples = str(t.split("=", 1)[1] or "").strip()
+                break
+            i += 1
+        if samples and not samples.startswith("-"):
+            sp = Path(samples)
+            if not sp.is_absolute():
+                sp = (repo / sp).resolve()
+            try:
+                if not sp.exists():
+                    return False, f"samples_not_found:{sp}"
+            except Exception:
+                pass
+
+    # Validate python module entrypoints (`python -m xxx`) up front.
+    py_names = {
+        "python",
+        "python3",
+        Path(str(env.get("AIDER_FSM_PYTHON") or "")).name.strip(),
+        Path(str(env.get("PYTHON") or "")).name.strip(),
+    }
+    py_names = {x for x in py_names if x}
+    if tok in py_names:
+        if len(tail_parts) >= 3 and str(tail_parts[1]) == "-m":
+            module = str(tail_parts[2] or "").strip()
+            if module:
+                probe_py = (
+                    str(env.get("AIDER_FSM_PYTHON") or "").strip()
+                    or str(env.get("PYTHON") or "").strip()
+                    or tok
+                    or "python3"
+                )
+                code = (
+                    "import importlib.util, sys; "
+                    "m = (sys.argv[1] if len(sys.argv) > 1 else '').strip(); "
+                    "sys.exit(0 if (m and importlib.util.find_spec(m) is not None) else 3)"
+                )
+                try:
+                    res = subprocess.run(
+                        [probe_py, "-c", code, module],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=min(max(2, int(timeout_seconds)), 8),
+                        cwd=str(repo),
+                        env=env,
+                    )
+                except Exception as e:
+                    return None, f"probe_module_check_failed:{e}"
+                if int(res.returncode) != 0:
+                    return False, f"module_not_found:{module}"
+                return True, "ok"
+
+    if shutil.which(tok) is None:
+        return False, f"binary_not_found:{tok}"
+    return True, "ok"
+
+
+def _matched_anchors(text: str, *, anchors: list[str]) -> list[str]:
+    if not anchors:
+        return []
+    low = str(text or "").lower()
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in anchors:
+        a = str(raw or "").strip()
+        if not a:
+            continue
+        if a in seen:
+            continue
+        if a.lower() in low:
+            seen.add(a)
+            out.append(a)
+    return out
+
+
 def run_hints(
     *,
     repo: Path,
@@ -251,11 +759,21 @@ def run_hints(
             raw_hints = _read_hints_file(hints_file)
 
     anchors = _parse_json_str_list(env2.get("AIDER_FSM_HINT_ANCHORS_JSON"))
-    used_anchors = [anchors[0]] if anchors else []
+    used_anchors: list[str] = []
 
     kind = (env2.get("AIDER_LLM_KIND") or "").strip().lower()
     prefer_offline = _is_truthy(env2.get("AIDER_FSM_PREFER_OFFLINE_HINTS"))
     login_shell = _is_truthy(env2.get("AIDER_FSM_HINT_LOGIN_SHELL"))
+    strict_compat = _is_truthy(env2.get("AIDER_FSM_HINT_STRICT_COMPAT", "1"))
+    require_real_score = _is_truthy(env2.get("AIDER_FSM_REQUIRE_REAL_SCORE"))
+    artifacts_dir_s = str(env2.get("AIDER_FSM_ARTIFACTS_DIR") or "").strip()
+    artifacts_dir: Path | None = None
+    if artifacts_dir_s:
+        try:
+            p = Path(artifacts_dir_s).expanduser()
+            artifacts_dir = p.resolve() if p.is_absolute() else (repo / p).resolve()
+        except Exception:
+            artifacts_dir = None
 
     def _priority(raw: str) -> int:
         s = str(raw or "").lower()
@@ -295,11 +813,170 @@ def run_hints(
     raw_hints.sort(key=_priority, reverse=True)
 
     attempts: list[HintAttempt] = []
+    probes: list[HintProbe] = []
     chosen: str | None = None
     ok = False
     score = 0.0
     reason = ""
+    rc0_no_score = False
     docker_status: tuple[bool, str] | None = None
+    hint_work_root: Path | None = None
+
+    def _looks_like_openai_codegen_eval(cmd: str) -> bool:
+        # Heuristic: `.evaluate/.codegen` CLIs with `--backend openai` + `--model` + `--dataset`
+        # and without `--samples` are likely to generate outputs under a default relative root.
+        low = _first_command_line(cmd).lower()
+        if not low:
+            return False
+        if "--samples" in low or " -s " in f" {low} ":
+            return False
+        if ("--backend openai" not in low) and ("--backend=openai" not in low):
+            return False
+        if "--model" not in low or "--dataset" not in low:
+            return False
+        if (".evaluate" not in low) and (".codegen" not in low):
+            return False
+        return True
+
+    def _hint_workdir(cmd: str, *, attempt_no: int) -> Path:
+        nonlocal hint_work_root
+        # Default: run hints from repo root.
+        if artifacts_dir is None:
+            return repo
+        # Use isolated workdirs for docker hints so any container-created output dirs
+        # (often owned by root) do not contaminate the repo or break subsequent hints.
+        if _DOCKER_LINE_RE.search(cmd) or _looks_like_openai_codegen_eval(cmd):
+            if hint_work_root is None:
+                hint_work_root = (artifacts_dir / "hints_workdir").resolve()
+                hint_work_root.mkdir(parents=True, exist_ok=True)
+            wd = (hint_work_root / f"attempt_{attempt_no:02d}").resolve()
+            wd.mkdir(parents=True, exist_ok=True)
+            return wd
+        return repo
+
+    def _maybe_prepare_dataset_override(cmd: str, *, workdir: Path, env: dict[str, str]) -> dict[str, str]:
+        """Best-effort: create a small dataset override file for smoke/full-lite runs.
+
+        Some evaluators read `HUMANEVAL_OVERRIDE_PATH` / `MBPP_OVERRIDE_PATH` to override
+        their dataset JSONL source. When `AIDER_EVAL_LIMIT` is set, we can generate an
+        override file with the first N tasks to bound runtime without depending on
+        evaluator-specific CLI flags.
+        """
+        try:
+            lim = int(str(env.get("AIDER_EVAL_LIMIT") or "").strip() or 0)
+        except Exception:
+            lim = 0
+        if lim <= 0:
+            return env
+
+        dataset = _extract_cli_flag_value(cmd, "--dataset").strip().lower()
+        if dataset not in ("humaneval", "mbpp"):
+            return env
+
+        override_var = "HUMANEVAL_OVERRIDE_PATH" if dataset == "humaneval" else "MBPP_OVERRIDE_PATH"
+        if str(env.get(override_var) or "").strip():
+            return env
+
+        # Identify the evaluator package from `python -m pkg.mod ...`.
+        line = _first_command_line(cmd)
+        if not line:
+            return env
+        try:
+            parts = shlex.split(line, posix=True)
+        except Exception:
+            return env
+        if "-m" not in parts:
+            return env
+        try:
+            module = str(parts[parts.index("-m") + 1] or "").strip()
+        except Exception:
+            module = ""
+        if not module or "." not in module:
+            return env
+        pkg = module.split(".", 1)[0].strip()
+        if not pkg:
+            return env
+
+        out_path = (Path(workdir) / f"{dataset}_override_{lim}.jsonl").resolve()
+        # If the file already exists, reuse it.
+        try:
+            if out_path.exists() and out_path.is_file() and out_path.stat().st_size > 0:
+                env2 = dict(env)
+                env2[override_var] = str(out_path)
+                return env2
+        except Exception:
+            pass
+
+        # Prefer the runner-provided python when available.
+        py_exec = str(env.get("AIDER_FSM_PYTHON") or env.get("PYTHON") or sys.executable).strip() or sys.executable
+        try:
+            p = Path(py_exec).expanduser()
+            if not p.is_absolute() and ("/" in py_exec or py_exec.startswith((".", "~"))):
+                cand = (repo / p).resolve()
+                if cand.exists():
+                    py_exec = str(cand)
+        except Exception:
+            pass
+
+        code = r"""
+import importlib
+import json
+import sys
+from pathlib import Path
+
+pkg = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
+dataset = (sys.argv[2] if len(sys.argv) > 2 else "").strip().lower()
+out = Path(sys.argv[3] if len(sys.argv) > 3 else "").expanduser().resolve()
+limit = int(sys.argv[4] if len(sys.argv) > 4 else "0")
+if not pkg or not out or limit <= 0:
+    raise SystemExit(2)
+
+if dataset == "humaneval":
+    dm = importlib.import_module(pkg + ".data.humaneval")
+    src = dm._ready_human_eval_plus_path()
+elif dataset == "mbpp":
+    dm = importlib.import_module(pkg + ".data.mbpp")
+    src = dm._ready_mbpp_plus_path()
+else:
+    raise SystemExit(3)
+
+seen = set()
+out.parent.mkdir(parents=True, exist_ok=True)
+with open(src, "r", encoding="utf-8", errors="replace") as f, open(out, "w", encoding="utf-8") as g:
+    for line in f:
+        s = line.strip()
+        if not s:
+            continue
+        obj = json.loads(s)
+        tid = obj.get("task_id")
+        if not isinstance(tid, str) or not tid.strip():
+            continue
+        if tid in seen:
+            continue
+        seen.add(tid)
+        g.write(s + "\n")
+        if len(seen) >= limit:
+            break
+if len(seen) <= 0:
+    raise SystemExit(4)
+"""
+        try:
+            res = subprocess.run(
+                [py_exec, "-c", code, pkg, dataset, str(out_path), str(lim)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=str(repo),
+                env=env,
+            )
+            if int(res.returncode) == 0 and out_path.exists():
+                env2 = dict(env)
+                env2[override_var] = str(out_path)
+                return env2
+        except Exception:
+            return env
+        return env
 
     def _parse_pytest_counts(text: str) -> tuple[int, int, int] | None:
         """Parse (passed, failed, errors) from pytest output (best-effort)."""
@@ -326,10 +1003,13 @@ def run_hints(
             return None
         return passed, failed, errors
 
-    for raw in raw_hints:
-        if len(attempts) >= int(max(0, max_attempts)):
-            break
+    candidates: list[dict[str, Any]] = []
+    probe_timeout = min(max(3, int(timeout_seconds)), 20)
+    seen_sanitized: set[str] = set()
 
+    # Phase 1: normalize + probe runnability without executing hinted workloads.
+    for raw in raw_hints:
+        priority = _priority(raw)
         sanitized, skip_reason = normalize_hint_command(raw, env=env2)
         if skip_reason is not None:
             attempts.append(
@@ -344,12 +1024,58 @@ def run_hints(
                     skip_reason=skip_reason,
                 )
             )
+            probes.append(HintProbe(raw=raw, sanitized=sanitized, ok=False, reason=skip_reason, priority=priority))
+            continue
+
+        key = str(sanitized or "").strip()
+        if key in seen_sanitized:
+            attempts.append(
+                HintAttempt(
+                    raw=raw,
+                    sanitized=sanitized,
+                    rc=0,
+                    seconds=0.0,
+                    timed_out=False,
+                    stdout_tail="",
+                    stderr_tail="",
+                    skip_reason="duplicate_sanitized_hint",
+                )
+            )
+            probes.append(
+                HintProbe(
+                    raw=raw,
+                    sanitized=sanitized,
+                    ok=False,
+                    reason="duplicate_sanitized_hint",
+                    priority=priority,
+                )
+            )
+            continue
+        seen_sanitized.add(key)
+
+        compat_ok, compat_reason = _hint_runtime_compatible(cmd=sanitized, env=env2, strict_compat=strict_compat)
+        if not compat_ok:
+            skip = f"incompatible_hint: {compat_reason}"
+            attempts.append(
+                HintAttempt(
+                    raw=raw,
+                    sanitized=sanitized,
+                    rc=0,
+                    seconds=0.0,
+                    timed_out=False,
+                    stdout_tail="",
+                    stderr_tail="",
+                    skip_reason=skip,
+                )
+            )
+            probes.append(HintProbe(raw=raw, sanitized=sanitized, ok=False, reason=skip, priority=priority))
             continue
 
         if _DOCKER_LINE_RE.search(sanitized):
             if docker_status is None:
                 docker_status = _docker_available(env=env2)
             if not docker_status[0]:
+                skip = f"docker_unavailable: {docker_status[1]}"
                 attempts.append(
                     HintAttempt(
                         raw=raw,
@@ -359,9 +1085,98 @@ def run_hints(
                         timed_out=False,
                         stdout_tail="",
                         stderr_tail="",
-                        skip_reason=f"docker_unavailable: {docker_status[1]}",
+                        skip_reason=skip,
                     )
                 )
+                probes.append(HintProbe(raw=raw, sanitized=sanitized, ok=False, reason=skip, priority=priority))
+                continue
+
+        probe_ok, probe_reason = _probe_hint_command(
+            cmd=sanitized,
+            repo=repo,
+            env=env2,
+            timeout_seconds=probe_timeout,
+        )
+        probes.append(
+            HintProbe(
+                raw=raw,
+                sanitized=sanitized,
+                ok=probe_ok,
+                reason=str(probe_reason or ""),
+                priority=priority,
+            )
+        )
+        candidates.append(
+            {
+                "raw": raw,
+                "sanitized": sanitized,
+                "priority": int(priority),
+                "probe_ok": probe_ok,
+                "probe_reason": str(probe_reason or ""),
+            }
+        )
+
+    def _probe_rank(v: bool | None) -> int:
+        if v is True:
+            return 2
+        if v is None:
+            return 1
+        return 0
+
+    candidates.sort(key=lambda x: (_probe_rank(x.get("probe_ok")), int(x.get("priority") or 0)), reverse=True)
+
+    # Phase 2: execute best candidates only (bounded by max_attempts).
+    executed = 0
+    openai_auth_failed = False
+    for cand in candidates:
+        if executed >= int(max(0, max_attempts)):
+            break
+
+        probe_ok = cand.get("probe_ok")
+        probe_reason = str(cand.get("probe_reason") or "")
+        raw = str(cand.get("raw") or "")
+        sanitized = str(cand.get("sanitized") or "")
+
+        if openai_auth_failed and _is_remote_openai_hint(sanitized):
+            attempts.append(
+                HintAttempt(
+                    raw=raw,
+                    sanitized=sanitized,
+                    rc=0,
+                    seconds=0.0,
+                    timed_out=False,
+                    stdout_tail="",
+                    stderr_tail="",
+                    skip_reason="skipped_after_openai_auth_failure",
+                )
+            )
+            continue
+
+        if probe_ok is False:
+            attempts.append(
+                HintAttempt(
+                    raw=raw,
+                    sanitized=sanitized,
+                    rc=0,
+                    seconds=0.0,
+                    timed_out=False,
+                    stdout_tail="",
+                    stderr_tail="",
+                    skip_reason=f"probe_failed: {probe_reason or 'unrunnable'}",
+                )
+            )
+            continue
+
+        workdir = _hint_workdir(sanitized, attempt_no=int(executed) + 1)
+        metrics_paths = _candidate_metrics_paths(sanitized, repo=repo, workdir=workdir if workdir != repo else None)
+        if require_real_score:
+            metrics_paths.append((repo / ".aider_fsm" / "metrics.json").resolve())
+        pre_mtimes: dict[Path, float] = {}
+        for p in metrics_paths:
+            try:
+                if p.exists():
+                    pre_mtimes[p] = float(p.stat().st_mtime)
+            except Exception:
                 continue
 
         t0 = time.monotonic()
@@ -370,6 +1185,18 @@ def run_hints(
             # IMPORTANT: prefer a non-login shell by default so bootstrap PATH overrides
             # (e.g. `.aider_fsm/venv/bin:$PATH`) are preserved. Login shells frequently
             # reset PATH via /etc/profile and can accidentally select global tools.
+            env3 = env2
+            if workdir != repo:
+                # When running from an artifacts workdir, keep the repo root importable
+                # for `python -m pkg.mod` style hints that rely on local modules.
+                env3 = dict(env2)
+                repo_s = str(repo)
+                pp = str(env3.get("PYTHONPATH") or "")
+                parts = [p for p in pp.split(os.pathsep) if p]
+                if repo_s not in parts:
+                    env3["PYTHONPATH"] = pp + (os.pathsep if pp else "") + repo_s
+            if workdir != repo and _looks_like_openai_codegen_eval(sanitized):
+                env3 = _maybe_prepare_dataset_override(sanitized, workdir=workdir, env=env3)
             bash_args = ["bash", "-lc", sanitized] if login_shell else ["bash", "-c", sanitized]
             res = subprocess.run(
                 bash_args,
@@ -377,8 +1204,8 @@ def run_hints(
                 capture_output=True,
                 text=True,
                 timeout=float(timeout_seconds),
-                cwd=str(repo),
-                env=env2,
+                cwd=str(workdir),
+                env=env3,
             )
             rc = int(res.returncode)
             out = res.stdout or ""
@@ -393,6 +1220,7 @@ def run_hints(
             if isinstance(err, bytes):
                 err = err.decode("utf-8", errors="replace")
 
+        executed += 1
         dt = time.monotonic() - t0
         attempts.append(
             HintAttempt(
@@ -407,20 +1235,69 @@ def run_hints(
             )
         )
 
+        low_cmd = sanitized.lower()
+
+        if rc == 0 and require_real_score:
+            # Prefer deterministic file outputs when available, otherwise parse stdout/stderr.
+            extracted: float | None = None
+            source = ""
+
+            # Pytest: use passed/total as a concrete score (even when rc==0).
+            if "pytest" in low_cmd:
+                tail_text = _tail(out, 20000) + "\n" + _tail(err, 20000)
+                counts = _parse_pytest_counts(tail_text)
+                if counts is not None:
+                    passed, failed, errors = counts
+                    total = max(1, passed + failed + errors)
+                    extracted = float(passed) / float(total)
+                    source = f"pytest_counts: passed={passed} failed={failed} errors={errors}"
+
+            if extracted is None:
+                for p in metrics_paths:
+                    try:
+                        if not p.exists():
+                            continue
+                        mt = float(p.stat().st_mtime)
+                        if p in pre_mtimes and mt <= pre_mtimes[p] + 1e-6:
+                            continue
+                    except Exception:
+                        continue
+                    val, src = _extract_score_from_json_file(p)
+                    if val is not None:
+                        extracted = float(val)
+                        source = f"file:{p.name}:{src}"
+                        break
+
+            if extracted is None:
+                val, src = _extract_score_from_text(_tail(out, 20000) + "\n" + _tail(err, 20000))
+                if val is not None:
+                    extracted = float(val)
+                    source = src
+
+            if extracted is not None:
+                chosen = sanitized
+                ok = True
+                score = float(extracted)
+                reason = str(source or "ok")
+                used_anchors = _matched_anchors(sanitized, anchors=anchors)
+                break
+
+            rc0_no_score = True
+            # Continue trying other hints to find one that yields a parseable score.
+            continue
+
         if rc == 0:
             chosen = sanitized
             ok = True
             score = 1.0
             reason = ""
+            used_anchors = _matched_anchors(sanitized, anchors=anchors)
             break
 
         # Some evaluation commands (notably `pytest`) intentionally return non-zero
         # when checks fail, but still produce useful numeric metrics. Treat these as
         # a "successful run" and derive score from the outputs.
-        low_cmd = sanitized.lower()
         if "pytest" in low_cmd:
-            # Parse from the tail: pytest summaries are printed at the end, and
-            # this avoids scanning extremely large outputs.
             tail_text = _tail(out, 20000) + "\n" + _tail(err, 20000)
             counts = _parse_pytest_counts(tail_text)
             if counts is not None:
@@ -430,11 +1307,22 @@ def run_hints(
                 ok = True
                 score = float(passed) / float(total)
                 reason = f"pytest_nonzero_exit: passed={passed} failed={failed} errors={errors}"
+                used_anchors = _matched_anchors(sanitized, anchors=anchors)
                 break
+
+        if _is_remote_openai_hint(sanitized):
+            if _contains_openai_auth_error((_tail(out, 12000) + "\n" + _tail(err, 12000))):
+                openai_auth_failed = True
 
     if not ok:
         if not raw_hints:
             reason = "no_hints"
+        elif require_real_score and rc0_no_score:
+            reason = "all_hints_no_real_score"
+        elif openai_auth_failed:
+            reason = "all_hints_auth_failed_or_unrunnable"
+        elif candidates and not any((c.get("probe_ok") is not False) for c in candidates):
+            reason = "all_hints_unrunnable"
         elif any(a.skip_reason == "unresolved_brackets" for a in attempts):
             reason = "all_hints_unresolved_or_failed"
         else:
@@ -445,6 +1333,17 @@ def run_hints(
         "score": float(score) if ok else 0.0,
         "chosen_command": chosen,
         "used_anchors": used_anchors,
+        "executed_attempts": int(executed),
+        "probes": [
+            {
+                "raw": p.raw,
+                "sanitized": p.sanitized,
+                "ok": p.ok,
+                "reason": p.reason,
+                "priority": p.priority,
+            }
+            for p in probes
+        ],
         "attempts": [
             {
                 "raw": a.raw,

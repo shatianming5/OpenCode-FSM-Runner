@@ -12,14 +12,39 @@ from pathlib import Path
 from .agent_client import AgentClient
 from .bootstrap import run_bootstrap
 from .contract_hints import suggest_contract_hints
+from .contract_provenance import (
+    build_contract_provenance_report,
+    dump_provenance,
+    snapshot_contract_files,
+)
 from .opencode_client import OpenCodeClient
-from .prompts import make_scaffold_contract_prompt
+from .prompts import make_scaffold_contract_prompt, make_scaffold_contract_retry_prompt
 from .pipeline_spec import PipelineSpec, load_pipeline_spec
 from .pipeline_verify import run_pipeline_verification
 from .repo_resolver import prepare_repo
-from .scaffold_validation import validate_scaffolded_files, validate_scaffolded_pipeline
+from .scaffold_validation import validate_scaffold_contract
 from .subprocess_utils import tail, write_text
 from .types import VerificationResult
+
+
+def _classify_opencode_transport_error(err_text: str) -> str:
+    low = str(err_text or "").strip().lower()
+    if not low:
+        return ""
+    needles = (
+        "connection refused",
+        "failed to establish a new connection",
+        "connection reset",
+        "connection aborted",
+        "timed out",
+        "timeout",
+        "network is unreachable",
+        "temporary failure in name resolution",
+        "name or service not known",
+    )
+    if any(n in low for n in needles):
+        return "opencode_transport_unavailable"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -127,7 +152,20 @@ def _resolve_model(raw_model: str) -> str:
     """
     s = str(raw_model or "").strip()
     if not s:
+        env_default = str(
+            os.environ.get("OPENCODE_MODEL")
+            or os.environ.get("OPENAI_MODEL")
+            or os.environ.get("CHAT_MODEL")
+            or os.environ.get("LITELLM_CHAT_MODEL")
+            or ""
+        ).strip()
+        if env_default:
+            return _resolve_model(env_default)
         candidates = _list_opencode_models()
+        if "myproxy/deepseek-v3.2" in candidates:
+            return "myproxy/deepseek-v3.2"
+        if "openai/deepseek-v3.2" in candidates:
+            return "openai/deepseek-v3.2"
         if "openai/gpt-4o-mini" in candidates:
             return "openai/gpt-4o-mini"
         if "opencode/gpt-5-nano" in candidates:
@@ -136,6 +174,23 @@ def _resolve_model(raw_model: str) -> str:
             return candidates[0]
         return "openai/gpt-4o-mini"
     if "/" in s:
+        candidates = _list_opencode_models()
+        if not candidates:
+            return s
+        # If the exact provider/model exists locally, keep it.
+        if s in candidates:
+            return s
+        # Otherwise, try to map to an available provider for the same model id.
+        try:
+            _provider, model_id = s.split("/", 1)
+        except Exception:
+            return s
+        matches = [m for m in candidates if m.split("/", 1)[1] == model_id]
+        if matches:
+            for m in matches:
+                if m.startswith("myproxy/"):
+                    return m
+            return matches[0]
         return s
     candidates = _list_opencode_models()
     matches = [m for m in candidates if m.split("/", 1)[1] == s]
@@ -144,223 +199,9 @@ def _resolve_model(raw_model: str) -> str:
             if m.startswith("myproxy/"):
                 return m
         return matches[0]
+    if candidates:
+        return candidates[0]
     return f"openai/{s}"
-
-
-def _ensure_contract_stage_skeleton(repo_root: Path, *, force_rels: set[str] | None = None) -> None:
-    """Best-effort: create robust default stage scripts before OpenCode scaffolding.
-
-    This reduces common scaffolding failures (e.g., broken heredocs) without introducing
-    benchmark-specific logic. The scaffolder may still edit/override these scripts.
-    """
-    repo_root = Path(repo_root).resolve()
-    stages = (repo_root / ".aider_fsm" / "stages").resolve()
-    stages.mkdir(parents=True, exist_ok=True)
-    force = set(str(x) for x in (force_rels or set()))
-
-    def _bash_syntax_ok(path: Path) -> bool:
-        try:
-            res = subprocess.run(
-                ["bash", "-n", str(path)],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=3,
-            )
-        except Exception:
-            # If we cannot validate, avoid overwriting.
-            return True
-        return int(res.returncode) == 0
-
-    def _write_if_missing(rel: str, content: str) -> None:
-        p = (repo_root / rel).resolve()
-        if rel in force:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(content, encoding="utf-8")
-            return
-        if p.exists():
-            try:
-                if p.is_file() and p.stat().st_size > 0:
-                    if not str(p).endswith(".sh") or _bash_syntax_ok(p):
-                        return
-            except Exception:
-                return
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
-
-    _write_if_missing(
-        ".aider_fsm/stages/tests.sh",
-        "#!/usr/bin/env bash\n"
-        "set -Eeuo pipefail\n"
-        "echo tests_skipped\n",
-    )
-    _write_if_missing(
-        ".aider_fsm/stages/deploy_setup.sh",
-        "#!/usr/bin/env bash\n"
-        "set -Eeuo pipefail\n"
-        "mkdir -p .aider_fsm\n"
-        "RUNTIME_ENV_JSON=\"${AIDER_RUNTIME_ENV_PATH:-.aider_fsm/runtime_env.json}\"\n"
-        "\n"
-        "if [ \"${AIDER_LLM_KIND:-local_hf}\" = \"remote\" ]; then\n"
-        "  if [ -z \"${AIDER_LLM_MODEL:-}\" ]; then\n"
-        "    \"$AIDER_FSM_PYTHON\" - <<'PY' > \"$RUNTIME_ENV_JSON\"\n"
-        "import json, os, time\n"
-        "base = os.getenv('OPENAI_API_BASE') or os.getenv('OPENAI_BASE_URL') or ''\n"
-        "model = os.getenv('AIDER_LLM_MODEL') or os.getenv('OPENAI_MODEL') or ''\n"
-        "obj = {\n"
-        "  'ts': time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime()),\n"
-        "  'run_id': os.getenv('AIDER_FSM_RUN_ID',''),\n"
-        "  'service': {},\n"
-        "  'inference': {'type': 'openai_compat', 'openai_base_url': base, 'model': model},\n"
-        "  'paths': {'rollout_path': '.aider_fsm/rollout.json', 'metrics_path': '.aider_fsm/metrics.json'},\n"
-        "  'ok': False,\n"
-        "  'reason': 'AIDER_LLM_MODEL is not set',\n"
-        "}\n"
-        "print(json.dumps(obj, ensure_ascii=False, indent=2))\n"
-        "PY\n"
-        "    exit 2\n"
-        "  fi\n"
-        "  \"$AIDER_FSM_PYTHON\" - <<'PY' > \"$RUNTIME_ENV_JSON\"\n"
-        "import json, os, time\n"
-        "base = os.getenv('OPENAI_API_BASE') or os.getenv('OPENAI_BASE_URL') or ''\n"
-        "model = os.getenv('AIDER_LLM_MODEL') or os.getenv('OPENAI_MODEL') or ''\n"
-        "obj = {\n"
-        "  'ts': time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime()),\n"
-        "  'run_id': os.getenv('AIDER_FSM_RUN_ID',''),\n"
-        "  'service': {},\n"
-        "  'inference': {'type': 'openai_compat', 'openai_base_url': base, 'model': model},\n"
-        "  'paths': {'rollout_path': '.aider_fsm/rollout.json', 'metrics_path': '.aider_fsm/metrics.json'},\n"
-        "  'ok': True,\n"
-        "}\n"
-        "print(json.dumps(obj, ensure_ascii=False, indent=2))\n"
-        "PY\n"
-        "  echo \"Wrote $RUNTIME_ENV_JSON\"\n"
-        "  exit 0\n"
-        "fi\n"
-        "\n"
-        "if [ -z \"${AIDER_TRAINED_MODEL_DIR:-}\" ]; then\n"
-        "  \"$AIDER_FSM_PYTHON\" - <<'PY' > \"$RUNTIME_ENV_JSON\"\n"
-        "import json, os, time\n"
-        "obj = {\n"
-        "  'ts': time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime()),\n"
-        "  'run_id': os.getenv('AIDER_FSM_RUN_ID',''),\n"
-        "  'service': {},\n"
-        "  'inference': {'type': 'local_hf', 'model_dir': ''},\n"
-        "  'paths': {'rollout_path': '.aider_fsm/rollout.json', 'metrics_path': '.aider_fsm/metrics.json'},\n"
-        "  'ok': False,\n"
-        "  'reason': 'AIDER_TRAINED_MODEL_DIR is not set',\n"
-        "}\n"
-        "print(json.dumps(obj, ensure_ascii=False, indent=2))\n"
-        "PY\n"
-        "  exit 2\n"
-        "fi\n"
-        "\n"
-        "# Recommended: use the runner's built-in OpenAI-compatible server helper.\n"
-        "\"$AIDER_FSM_PYTHON\" -m runner.ml.serve_openai_compat start \\\n"
-        "  --backend hf \\\n"
-        "  --model-dir \"$AIDER_TRAINED_MODEL_DIR\" \\\n"
-        "  --host 127.0.0.1 \\\n"
-        "  --port 0 \\\n"
-        "  --runtime-env-out \"$RUNTIME_ENV_JSON\" \\\n"
-        "  --pid-file .aider_fsm/server.pid \\\n"
-        "  --log-file \"${AIDER_FSM_ARTIFACTS_DIR:-.aider_fsm/artifacts}/server.log\"\n"
-        "echo \"Wrote $RUNTIME_ENV_JSON\"\n",
-    )
-    _write_if_missing(
-        ".aider_fsm/stages/deploy_health.sh",
-        "#!/usr/bin/env bash\n"
-        "set -Eeuo pipefail\n"
-        "RUNTIME_ENV_JSON=\"${AIDER_RUNTIME_ENV_PATH:-.aider_fsm/runtime_env.json}\"\n"
-        "test -f \"$RUNTIME_ENV_JSON\"\n"
-        "# Best-effort: check health_url if present.\n"
-        "\"$AIDER_FSM_PYTHON\" - <<'PY'\n"
-        "import json, urllib.request, os\n"
-        "p = os.environ.get('AIDER_RUNTIME_ENV_PATH') or '.aider_fsm/runtime_env.json'\n"
-        "obj = json.load(open(p,'r',encoding='utf-8'))\n"
-        "url = (obj.get('service') or {}).get('health_url')\n"
-        "if not url:\n"
-        "  raise SystemExit(0)\n"
-        "with urllib.request.urlopen(url, timeout=3) as r:\n"
-        "  _ = r.read()\n"
-        "print('ok')\n"
-        "PY\n",
-    )
-    _write_if_missing(
-        ".aider_fsm/stages/deploy_teardown.sh",
-        "#!/usr/bin/env bash\n"
-        "set -Eeuo pipefail\n"
-        "\"$AIDER_FSM_PYTHON\" -m runner.ml.serve_openai_compat stop --pid-file .aider_fsm/server.pid || true\n"
-        "echo teardown_ok\n",
-    )
-    _write_if_missing(
-        ".aider_fsm/stages/rollout.sh",
-        "#!/usr/bin/env bash\n"
-        "set -Eeuo pipefail\n"
-        "mkdir -p .aider_fsm\n"
-        "\"$AIDER_FSM_PYTHON\" -m runner.generic_rollout\n"
-        "echo \"Wrote .aider_fsm/rollout.json\"\n",
-    )
-    _write_if_missing(
-        ".aider_fsm/stages/evaluation.sh",
-        "#!/usr/bin/env bash\n"
-        "set -Eeuo pipefail\n"
-        "mkdir -p .aider_fsm\n"
-        "\"$AIDER_FSM_PYTHON\" -m runner.generic_evaluation\n",
-    )
-    _write_if_missing(
-        ".aider_fsm/stages/benchmark.sh",
-        "#!/usr/bin/env bash\n"
-        "set -Eeuo pipefail\n"
-        "echo benchmark_skipped\n",
-    )
-
-
-def _write_fallback_pipeline_yml(repo_root: Path, *, pipeline_rel: str, require_metrics: bool) -> None:
-    """Write a minimal v1 pipeline.yml referencing `.aider_fsm/stages/*.sh` (best-effort)."""
-    repo_root = Path(repo_root).resolve()
-    pipeline_rel = str(pipeline_rel or "pipeline.yml").strip() or "pipeline.yml"
-    pipeline_path = (repo_root / pipeline_rel).resolve()
-    if pipeline_path.exists():
-        return
-    required_keys = "[score, ok]" if require_metrics else "[]"
-    pipeline_path.write_text(
-        "\n".join(
-            [
-                "version: 1",
-                "security:",
-                "  mode: safe",
-                "  max_cmd_seconds: 7200",
-                "  max_total_seconds: 86400",
-                "tests:",
-                "  cmds:",
-                "    - bash .aider_fsm/stages/tests.sh",
-                "deploy:",
-                "  setup_cmds:",
-                "    - bash .aider_fsm/stages/deploy_setup.sh",
-                "  health_cmds:",
-                "    - bash .aider_fsm/stages/deploy_health.sh",
-                "  teardown_policy: on_failure",
-                "  teardown_cmds:",
-                "    - bash .aider_fsm/stages/deploy_teardown.sh",
-                "rollout:",
-                "  run_cmds:",
-                "    - bash .aider_fsm/stages/rollout.sh",
-                "evaluation:",
-                "  run_cmds:",
-                "    - bash .aider_fsm/stages/evaluation.sh",
-                "  metrics_path: .aider_fsm/metrics.json",
-                f"  required_keys: {required_keys}",
-                "benchmark:",
-                "  run_cmds:",
-                "    - bash .aider_fsm/stages/benchmark.sh",
-                "artifacts:",
-                "  out_dir: .aider_fsm/artifacts",
-                "",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
 
 
 def open_env(
@@ -374,8 +215,14 @@ def open_env(
     model: str = "",
     opencode_url: str = "",
     opencode_timeout_seconds: int = 300,
+    opencode_retry_attempts: int = 2,
+    opencode_retry_backoff_seconds: float = 2.0,
+    opencode_session_recover_attempts: int | None = None,
+    opencode_session_recover_backoff_seconds: float | None = None,
+    opencode_context_length: int | None = None,
+    opencode_max_prompt_chars: int | None = None,
     opencode_bash: str = "restricted",
-    scaffold_opencode_bash: str = "full",
+    scaffold_opencode_bash: str = "restricted",
     unattended: str = "strict",
     artifacts_dir: Path | None = None,
     seed_stage_skeleton: bool = True,
@@ -403,10 +250,39 @@ def open_env(
             out_dir.mkdir(parents=True, exist_ok=True)
             created_agent = False
             scaffold_err = ""
+            tool_trace: list[dict[str, object]] = []
+            provenance_written = False
+            contract_before = snapshot_contract_files(repo_root)
+            runner_written_paths: set[str] = set()
+            # Scaffold attempts are distinct from HTTP/message retry attempts.
+            # Keep a small default budget, but allow override for flaky models.
             try:
-                if bool(seed_stage_skeleton):
-                    # Provide a robust starting point to reduce common scaffolding failures.
-                    _ensure_contract_stage_skeleton(repo_root)
+                max_scaffold_attempts = int(os.environ.get("AIDER_OPENCODE_SCAFFOLD_ATTEMPTS") or 5)
+            except Exception:
+                max_scaffold_attempts = 5
+            max_scaffold_attempts = max(1, min(10, int(max_scaffold_attempts)))
+            last_failure_reason = ""
+
+            def _write_scaffold_provenance() -> None:
+                nonlocal provenance_written
+                if provenance_written:
+                    return
+                try:
+                    report = build_contract_provenance_report(
+                        repo=repo_root,
+                        purpose="scaffold_contract",
+                        strict_opencode=(not bool(seed_stage_skeleton) and not bool(write_fallback_pipeline_yml)),
+                        before=contract_before,
+                        after=snapshot_contract_files(repo_root),
+                        tool_trace=tool_trace,
+                        runner_written_paths=runner_written_paths,
+                    )
+                    dump_provenance(out_dir / "scaffold_provenance.json", report)
+                    provenance_written = True
+                except Exception:
+                    pass
+
+            try:
                 if agent is None:
                     created_agent = True
                     agent = OpenCodeClient(
@@ -416,8 +292,22 @@ def open_env(
                         model=_resolve_model(model),
                         base_url=(str(opencode_url or "").strip() or None),
                         timeout_seconds=int(opencode_timeout_seconds or 300),
+                        request_retry_attempts=int(opencode_retry_attempts or 0),
+                        request_retry_backoff_seconds=float(opencode_retry_backoff_seconds or 0.0),
+                        session_recover_attempts=(
+                            int(opencode_session_recover_attempts)
+                            if opencode_session_recover_attempts is not None
+                            else None
+                        ),
+                        session_recover_backoff_seconds=(
+                            float(opencode_session_recover_backoff_seconds)
+                            if opencode_session_recover_backoff_seconds is not None
+                            else None
+                        ),
+                        context_length=(int(opencode_context_length) if opencode_context_length is not None else None),
+                        max_prompt_chars=(int(opencode_max_prompt_chars) if opencode_max_prompt_chars is not None else None),
                         bash_mode=str(opencode_bash or "restricted"),
-                        scaffold_bash_mode=str(scaffold_opencode_bash or "full"),
+                        scaffold_bash_mode=str(scaffold_opencode_bash or "restricted"),
                         unattended=str(unattended or "strict"),
                         server_log_path=out_dir / "opencode_server.log",
                         session_title=f"{repo_root.name}:scaffold",
@@ -428,81 +318,164 @@ def open_env(
                         if str(opencode_url or "").strip()
                         else None,
                     )
-                try:
-                    hints = suggest_contract_hints(repo_root)
-                    if hints.commands:
-                        write_text(out_dir / "scaffold_command_hints.txt", "\n".join(hints.commands) + "\n")
-                    res = agent.run(
-                        make_scaffold_contract_prompt(
-                            repo_root,
-                            pipeline_rel=str(pipeline_rel).strip() or "pipeline.yml",
-                            require_metrics=bool(scaffold_require_metrics),
-                            command_hints=hints.commands,
-                        ),
-                        fsm_state="S0_SCAFFOLD",
-                        iter_idx=0,
-                        purpose="scaffold_contract",
+                hints = suggest_contract_hints(repo_root)
+                if hints.commands:
+                    write_text(out_dir / "scaffold_command_hints.txt", "\n".join(hints.commands) + "\n")
+
+                pipeline_ok = False
+                pipeline_path = (repo_root / str(pipeline_rel).strip() or "pipeline.yml").resolve()
+                for attempt in range(1, max_scaffold_attempts + 1):
+                    try:
+                        if attempt <= 1:
+                            prompt = make_scaffold_contract_prompt(
+                                repo_root,
+                                pipeline_rel=str(pipeline_rel).strip() or "pipeline.yml",
+                                require_metrics=bool(scaffold_require_metrics),
+                                command_hints=hints.commands,
+                            )
+                        else:
+                            prompt = make_scaffold_contract_retry_prompt(
+                                repo_root,
+                                pipeline_rel=str(pipeline_rel).strip() or "pipeline.yml",
+                                require_metrics=bool(scaffold_require_metrics),
+                                attempt=attempt,
+                                max_attempts=max_scaffold_attempts,
+                                previous_failure=last_failure_reason or scaffold_err,
+                                command_hints=hints.commands,
+                            )
+                        res = agent.run(
+                            prompt,
+                            fsm_state="S0_SCAFFOLD",
+                            iter_idx=max(0, attempt - 1),
+                            purpose="scaffold_contract",
+                        )
+                        turn_trace = [dict(x) for x in (res.tool_trace or []) if isinstance(x, dict)]
+                        for x in turn_trace:
+                            x["attempt"] = int(attempt)
+                        tool_trace.extend(turn_trace)
+                        write_text(
+                            out_dir / f"scaffold_agent_result_attempt_{attempt:02d}.txt",
+                            tail(res.assistant_text or "", 20000) + "\n",
+                        )
+                        write_text(out_dir / "scaffold_agent_result.txt", tail(res.assistant_text or "", 20000) + "\n")
+                    except Exception as e:
+                        scaffold_err = tail(str(e), 4000)
+                        write_text(out_dir / f"scaffold_agent_error_attempt_{attempt:02d}.txt", scaffold_err + "\n")
+                        write_text(out_dir / "scaffold_agent_error.txt", scaffold_err + "\n")
+
+                    if not pipeline_path.exists():
+                        transport_reason = _classify_opencode_transport_error(scaffold_err)
+                        if transport_reason:
+                            last_failure_reason = f"missing_pipeline_yml; {transport_reason}"
+                        else:
+                            last_failure_reason = "missing_pipeline_yml"
+                        continue
+
+                    try:
+                        parsed = load_pipeline_spec(pipeline_path)
+                    except Exception as e:
+                        last_failure_reason = f"pipeline_parse_error: {tail(str(e), 1000)}"
+                        write_text(
+                            out_dir / f"scaffold_agent_pipeline_parse_error_attempt_{attempt:02d}.txt",
+                            tail(str(e), 4000) + "\n",
+                        )
+                        write_text(out_dir / "scaffold_agent_pipeline_parse_error.txt", tail(str(e), 4000) + "\n")
+                        continue
+
+                    report = validate_scaffold_contract(
+                        repo_root,
+                        pipeline=parsed,
+                        require_metrics=bool(scaffold_require_metrics),
                     )
-                    write_text(out_dir / "scaffold_agent_result.txt", tail(res.assistant_text or "", 20000) + "\n")
-                except Exception as e:
-                    # Important: OpenCode timeouts can happen even when the agent has already written files.
-                    # If the contract artifacts exist and validate, continue instead of failing fast.
-                    scaffold_err = tail(str(e), 4000)
-                    write_text(out_dir / "scaffold_agent_error.txt", scaffold_err + "\n")
+                    if report.ok:
+                        pipeline_ok = True
+                        if report.warnings:
+                            write_text(
+                                out_dir / "scaffold_validation_warning.txt",
+                                "\n".join([f"- {x}" for x in report.warnings]) + "\n",
+                            )
+                        break
+
+                    last_failure_reason = "incomplete_contract: " + "; ".join(report.errors or [])
+                    write_text(
+                        out_dir / f"scaffold_agent_pipeline_validation_error_attempt_{attempt:02d}.txt",
+                        "Pipeline is parseable but does not meet scaffold requirements:\n"
+                        + "\n".join([f"- {x}" for x in report.errors])
+                        + ("\n" if report.errors else "")
+                        + (
+                            "Non-fatal warnings:\n"
+                            + "\n".join([f"- {x}" for x in (report.warnings or [])])
+                            + ("\n" if report.warnings else "")
+                            if report.warnings
+                            else ""
+                        ),
+                    )
+                    write_text(
+                        out_dir / "scaffold_agent_pipeline_validation_error.txt",
+                        "Pipeline is parseable but does not meet scaffold requirements:\n"
+                        + "\n".join([f"- {x}" for x in report.errors])
+                        + ("\n" if report.errors else ""),
+                    )
+
+                if not pipeline_ok:
+                    root_cause = _classify_opencode_transport_error(scaffold_err)
+                    _write_scaffold_provenance()
+                    write_text(
+                        out_dir / "scaffold_error.txt",
+                        "scaffold_contract_failed: missing_or_invalid_pipeline_yml\n"
+                        + f"attempts: {max_scaffold_attempts}\n"
+                        + (f"last_failure: {last_failure_reason}\n" if last_failure_reason else "")
+                        + (f"root_cause: {root_cause}\n" if root_cause else "")
+                        + (f"agent_error: {scaffold_err}\n" if scaffold_err else ""),
+                    )
+                    raise RuntimeError(
+                        f"scaffold_contract_failed: pipeline not created: {pipeline_path}"
+                        + (f" (last_failure: {last_failure_reason})" if last_failure_reason else "")
+                        + (f" (root_cause: {root_cause})" if root_cause else "")
+                        + (f" (agent_error: {scaffold_err})" if scaffold_err else "")
+                    )
             finally:
                 if created_agent and agent is not None:
                     try:
                         agent.close()
                     except Exception:
                         pass
-                if bool(seed_stage_skeleton):
-                    # If OpenCode wrote broken stage scripts (common with truncated heredocs),
-                    # restore a known-good skeleton so downstream repair can proceed.
-                    try:
-                        force_rels: set[str] | None = None
-                        if bool(write_fallback_pipeline_yml):
-                            # Non-strict mode: prefer the runner's built-in generic helpers for rollout/evaluation.
-                            force_rels = {".aider_fsm/stages/rollout.sh", ".aider_fsm/stages/evaluation.sh"}
-                        _ensure_contract_stage_skeleton(repo_root, force_rels=force_rels)
-                    except Exception:
-                        pass
 
-            if not pipeline_path.exists():
-                if bool(write_fallback_pipeline_yml):
-                    # Fallback: write a minimal pipeline.yml ourselves so downstream repair can proceed.
-                    # This keeps the behavior generic and avoids hard-failing when a model forgets tool calls.
-                    try:
-                        _write_fallback_pipeline_yml(
-                            repo_root,
-                            pipeline_rel=str(pipeline_rel).strip() or "pipeline.yml",
-                            require_metrics=bool(scaffold_require_metrics),
-                        )
-                        write_text(out_dir / "scaffold_fallback_used.txt", "wrote_fallback_pipeline_yml\n")
-                    except Exception:
-                        pass
-            if not pipeline_path.exists():
-                write_text(out_dir / "scaffold_error.txt", "scaffold_contract_failed: missing_pipeline_yml\n")
-                raise RuntimeError(
-                    f"scaffold_contract_failed: pipeline not created: {pipeline_path}"
-                    + (f" (agent_error: {scaffold_err})" if scaffold_err else "")
-                )
-
-            parsed = load_pipeline_spec(pipeline_path)
-            missing = validate_scaffolded_pipeline(parsed, require_metrics=bool(scaffold_require_metrics))
-            missing_files = validate_scaffolded_files(repo_root)
-            if missing or missing_files:
+            try:
+                parsed = load_pipeline_spec(pipeline_path)
+            except Exception:
+                _write_scaffold_provenance()
+                raise
+            report = validate_scaffold_contract(
+                repo_root,
+                pipeline=parsed,
+                require_metrics=bool(scaffold_require_metrics),
+            )
+            if not report.ok:
+                _write_scaffold_provenance()
                 write_text(
                     out_dir / "scaffold_error.txt",
                     "scaffold_contract_failed: incomplete_contract\n"
-                    + "\n".join([f"- {x}" for x in missing])
-                    + ("\n" if missing else "")
-                    + "\n".join([f"- missing_file: {x}" for x in missing_files])
-                    + ("\n" if missing_files else ""),
+                    + "\n".join([f"- {x}" for x in report.errors])
+                    + ("\n" if report.errors else "")
+                    + (
+                        "Non-fatal warnings:\n"
+                        + "\n".join([f"- {x}" for x in (report.warnings or [])])
+                        + ("\n" if report.warnings else "")
+                        if report.warnings
+                        else ""
+                    ),
                 )
                 raise RuntimeError(
-                    f"scaffold_contract_failed: incomplete contract: {missing + missing_files}"
+                    f"scaffold_contract_failed: incomplete contract: {report.errors}"
                     + (f" (agent_error: {scaffold_err})" if scaffold_err else "")
                 )
+            if report.warnings:
+                write_text(
+                    out_dir / "scaffold_validation_warning.txt",
+                    "\n".join([f"- {x}" for x in report.warnings]) + "\n",
+                )
+            _write_scaffold_provenance()
         elif require_pipeline:
             raise FileNotFoundError(f"pipeline not found: {pipeline_path}")
         else:

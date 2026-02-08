@@ -124,8 +124,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--scaffold-opencode-bash",
         choices=("restricted", "full"),
-        default="full",
-        help="OpenCode bash permission mode during `--scaffold-contract opencode` (default: full)",
+        default="restricted",
+        help="OpenCode bash permission mode during `--scaffold-contract opencode` (default: restricted)",
+    )
+    parser.add_argument(
+        "--strict-opencode",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "strict scaffold mode (compat flag). "
+            "Runner no longer prewrites/fallback-writes scaffold files; contract files must be produced by OpenCode/repo."
+        ),
     )
     parser.add_argument(
         "--env-file",
@@ -140,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--clone-dir",
         default="",
-        help="when --repo is a git URL, clone into this directory (default: /tmp/aider_fsm_targets)",
+        help="when --repo is a git URL, clone into this directory (default: /data/tiansha/aider_fsm_targets if writable, else /tmp/aider_fsm_targets)",
     )
     parser.add_argument(
         "--artifacts-dir",
@@ -168,6 +177,30 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=300,
         help="OpenCode HTTP timeout in seconds (default: 300)",
+    )
+    parser.add_argument(
+        "--opencode-retry-attempts",
+        type=int,
+        default=2,
+        help="OpenCode message retry attempts for timeout/transient errors (default: 2)",
+    )
+    parser.add_argument(
+        "--opencode-retry-backoff-seconds",
+        type=float,
+        default=2.0,
+        help="OpenCode retry backoff base seconds (exponential; default: 2.0)",
+    )
+    parser.add_argument(
+        "--opencode-context-length",
+        type=int,
+        default=0,
+        help="OpenCode context length hint for scaffold/repair (0 = unset)",
+    )
+    parser.add_argument(
+        "--opencode-max-prompt-chars",
+        type=int,
+        default=0,
+        help="Max prompt chars sent to OpenCode (0 = no clipping)",
     )
     parser.add_argument(
         "--opencode-bash",
@@ -308,7 +341,12 @@ def main(argv: list[str] | None = None) -> int:
 
     model = str(args.model or "").strip()
     if not model:
-        model = str(os.environ.get("OPENAI_MODEL") or os.environ.get("LITELLM_CHAT_MODEL") or "").strip()
+        model = str(
+            os.environ.get("OPENAI_MODEL")
+            or os.environ.get("CHAT_MODEL")
+            or os.environ.get("LITELLM_CHAT_MODEL")
+            or ""
+        ).strip()
     model = _resolve_model(model)
 
     cfg = RunnerConfig(
@@ -325,6 +363,7 @@ def main(argv: list[str] | None = None) -> int:
         require_pipeline=bool(args.require_pipeline),
         scaffold_contract=scaffold_contract,
         scaffold_require_metrics=bool(args.scaffold_require_metrics),
+        strict_opencode=bool(args.strict_opencode),
         artifacts_base=artifacts_base,
         seed_files=seed_files,
         max_iters=int(args.max_iters),
@@ -333,8 +372,12 @@ def main(argv: list[str] | None = None) -> int:
         preflight_only=bool(args.preflight_only),
         opencode_url=str(args.opencode_url or ""),
         opencode_timeout_seconds=int(args.opencode_timeout or 300),
+        opencode_retry_attempts=int(args.opencode_retry_attempts or 0),
+        opencode_retry_backoff_seconds=float(args.opencode_retry_backoff_seconds or 0.0),
+        opencode_context_length=(int(args.opencode_context_length) if int(args.opencode_context_length or 0) > 0 else None),
+        opencode_max_prompt_chars=(int(args.opencode_max_prompt_chars) if int(args.opencode_max_prompt_chars or 0) > 0 else None),
         opencode_bash=str(args.opencode_bash or "restricted"),
-        scaffold_opencode_bash=str(args.scaffold_opencode_bash or "full"),
+        scaffold_opencode_bash=str(args.scaffold_opencode_bash or "restricted"),
     )
     return run(cfg)
 

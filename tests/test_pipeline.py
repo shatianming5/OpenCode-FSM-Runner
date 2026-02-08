@@ -306,6 +306,71 @@ def test_run_pipeline_verification_require_hints_used_ok_passes(tmp_path: Path):
     assert verify.metrics == {"ok": True, "score": 1}
 
 
+def test_run_pipeline_verification_require_real_score_requires_hints_run_ok(tmp_path: Path):
+    """When real score is required, we must also have a successful hints_run.json."""
+    eval_cmd = _py_inline(
+        "import json, pathlib; "
+        "pathlib.Path('.aider_fsm').mkdir(parents=True, exist_ok=True); "
+        "pathlib.Path('.aider_fsm/hints_used.json').write_text(json.dumps({"
+        "'ok': True, 'used_anchors': ['pytest'], 'commands': ['pytest -q']"
+        "}) + '\\n'); "
+        "pathlib.Path('metrics.json').write_text(json.dumps({'ok': True, 'score': 1}) + '\\n')"
+    )
+    pipeline = PipelineSpec(
+        evaluation_run_cmds=[eval_cmd],
+        evaluation_metrics_path="metrics.json",
+        evaluation_required_keys=["score", "ok"],
+        evaluation_env={
+            "AIDER_FSM_REQUIRE_HINTS": "1",
+            "AIDER_FSM_HINT_ANCHORS_JSON": '["pytest"]',
+            "AIDER_FSM_REQUIRE_REAL_SCORE": "1",
+        },
+    )
+    verify = run_pipeline_verification(
+        tmp_path,
+        pipeline=pipeline,
+        tests_cmds=[_py_cmd(0)],
+        artifacts_dir=tmp_path / "artifacts",
+    )
+    assert verify.ok is False
+    assert verify.failed_stage == "evaluation"
+    assert any("evaluation.hints_run_requirement_failed" in e for e in (verify.metrics_errors or []))
+
+
+def test_run_pipeline_verification_require_real_score_hints_run_ok_passes(tmp_path: Path):
+    """With require_real_score, a valid hints_run.json should allow verification to pass."""
+    eval_cmd = _py_inline(
+        "import json, pathlib; "
+        "pathlib.Path('.aider_fsm').mkdir(parents=True, exist_ok=True); "
+        "pathlib.Path('.aider_fsm/hints_used.json').write_text(json.dumps({"
+        "'ok': True, 'used_anchors': ['pytest'], 'commands': ['pytest -q']"
+        "}) + '\\n'); "
+        "pathlib.Path('.aider_fsm/hints_run.json').write_text(json.dumps({"
+        "'ok': True, 'score': 0.25, 'chosen_command': 'pytest -q', 'executed_attempts': 1"
+        "}) + '\\n'); "
+        "pathlib.Path('metrics.json').write_text(json.dumps({'ok': True, 'score': 1}) + '\\n')"
+    )
+    pipeline = PipelineSpec(
+        evaluation_run_cmds=[eval_cmd],
+        evaluation_metrics_path="metrics.json",
+        evaluation_required_keys=["score", "ok"],
+        evaluation_env={
+            "AIDER_FSM_REQUIRE_HINTS": "1",
+            "AIDER_FSM_HINT_ANCHORS_JSON": '["pytest"]',
+            "AIDER_FSM_REQUIRE_REAL_SCORE": "1",
+        },
+    )
+    verify = run_pipeline_verification(
+        tmp_path,
+        pipeline=pipeline,
+        tests_cmds=[_py_cmd(0)],
+        artifacts_dir=tmp_path / "artifacts",
+    )
+    assert verify.ok is True
+    assert verify.failed_stage is None
+    assert verify.metrics == {"ok": True, "score": 1}
+
+
 def test_run_pipeline_verification_safe_mode_blocks_sudo(tmp_path: Path):
     """中文说明：
     - 含义：验证 safe security mode 会拦截 `sudo` 等危险命令。

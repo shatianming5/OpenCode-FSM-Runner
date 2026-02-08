@@ -78,7 +78,7 @@ If you want to run a simple train→(smoke)target loop over a list of URLs/paths
 pip install -r requirements-ml.txt
 python3 -m runner.ml.train_and_benchmark \
   --base-model Qwen/Qwen2.5-0.5B-Instruct \
-  --out-root /tmp/aider_train_runs \
+  --out-root /data/tiansha/aider_train_runs \
   --targets-file benchmarks.txt \
   --segments 1 \
   --steps-per-segment 8 \
@@ -111,7 +111,7 @@ OPENCODE_SERVER_PASSWORD=... python3 -m runner --repo . --opencode-url http://12
 
 ### Run a remote repo (auto-clone)
 
-You can point `--repo` at a git URL; the runner will clone it to `/tmp/aider_fsm_targets/` by default:
+You can point `--repo` at a git URL; the runner will clone it to `/data/tiansha/aider_fsm_targets/` by default when writable (otherwise it falls back to `/tmp/aider_fsm_targets/`):
 
 ```bash
 python3 -m runner --repo https://github.com/<owner>/<repo> --goal "运行 smoke benchmark" --test-cmd "python -V"
@@ -126,6 +126,15 @@ If a remote repo does **not** include `pipeline.yml`, the runner will auto-scaff
 (`pipeline.yml` + `.aider_fsm/`) so `--repo <url>` can run end-to-end. Disable with `--scaffold-contract off`.
 
 Control OpenCode bash permissions during scaffolding via `--scaffold-opencode-bash` (default: `full`).
+Scaffold strictness is controlled by `--strict-opencode` (default: on):
+
+- `--strict-opencode`: runner will not prewrite fallback contract files; only OpenCode/repo-preexisting files are accepted.
+- `--no-strict-opencode`: runner may seed `.aider_fsm/stages/*.sh` and fallback-write `pipeline.yml`.
+
+Scaffold/repair provenance files are written to artifacts as:
+
+- `scaffold_provenance.json`
+- `repair_provenance.json`
 
 If `git clone` is blocked (common in restricted networks), GitHub HTTPS/SSH URLs will fall back to downloading a GitHub archive ZIP
 (`main` then `master`) and extracting it locally.
@@ -218,6 +227,13 @@ python3 examples/verify_suite_single_file.py \
   --llm deepseek-v3.2 \
   --eval-mode full
 ```
+
+Complete regression is recommended as a 2x2 matrix:
+
+- smoke + strict: `--eval-mode smoke --strict-opencode`
+- full + strict: `--eval-mode full --strict-opencode`
+- smoke + non-strict: `--eval-mode smoke --no-strict-opencode`
+- full + non-strict: `--eval-mode full --no-strict-opencode`
 
 If a “full” evaluation command legitimately takes a long time, raise caps via env injection:
 

@@ -18,6 +18,30 @@ from urllib.request import Request, urlopen
 _OWNER_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _GITHUB_ARCHIVE_HOSTS = {"github.com", "www.github.com"}
 _HF_HOSTS = {"huggingface.co", "www.huggingface.co"}
+_PREFERRED_CLONES_BASE = Path("/data/tiansha/aider_fsm_targets")
+
+
+def _default_clones_base() -> Path:
+    """Prefer /data for large clone/snapshot caches, fallback to system temp."""
+    candidates = [
+        _PREFERRED_CLONES_BASE,
+        Path(tempfile.gettempdir()) / "aider_fsm_targets",
+    ]
+    for raw in candidates:
+        base = raw.expanduser().resolve()
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            continue
+        probe = base / ".aider_fsm_write_probe"
+        try:
+            probe.write_text("ok\n", encoding="utf-8")
+            probe.unlink()
+            return base
+        except Exception:
+            continue
+    # Last resort: temp dir path even if writability probe failed above.
+    return (Path(tempfile.gettempdir()) / "aider_fsm_targets").expanduser().resolve()
 
 
 def is_probably_repo_url(repo: str) -> bool:
@@ -54,7 +78,7 @@ def normalize_repo_url(repo: str) -> str:
 def _repo_slug(repo_url: str) -> str:
     """中文说明：
     - 含义：从 repo URL 生成一个适合作为本地目录名的 slug。
-    - 内容：提取 owner/repo（尽力），替换非法字符为 `_`，并限制长度；用于 `/tmp/aider_fsm_targets/<slug>_<ts>`。
+    - 内容：提取 owner/repo（尽力），替换非法字符为 `_`，并限制长度；用于 `<clones_base>/<slug>_<ts>`。
     - 可简略：可能（命名策略可调整；但需要保持稳定与避免路径注入）。
     """
     s = repo_url.strip().rstrip("/")
@@ -496,7 +520,7 @@ def prepare_repo(repo_arg: str, *, clones_dir: Path | None = None) -> PreparedRe
     hf = _parse_hf_dataset(raw)
     if hf:
         namespace, name = hf
-        base = clones_dir or (Path(tempfile.gettempdir()) / "aider_fsm_targets")
+        base = clones_dir or _default_clones_base()
         base = base.expanduser().resolve()
         base.mkdir(parents=True, exist_ok=True)
 
@@ -516,7 +540,7 @@ def prepare_repo(repo_arg: str, *, clones_dir: Path | None = None) -> PreparedRe
         return PreparedRepo(repo=dest.resolve(), cloned_from=raw)
 
     url = normalize_repo_url(raw)
-    base = clones_dir or (Path(tempfile.gettempdir()) / "aider_fsm_targets")
+    base = clones_dir or _default_clones_base()
     base = base.expanduser().resolve()
     base.mkdir(parents=True, exist_ok=True)
 

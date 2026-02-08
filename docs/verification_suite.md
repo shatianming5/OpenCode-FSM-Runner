@@ -15,8 +15,9 @@ It exercises the same shape you’d use in your own one-file training/eval loops
 
 - **No benchmark-specific glue code** in this repo: targets are expected to provide a runnable contract via
   `pipeline.yml` + `.aider_fsm/stages/*.sh`.
-- If a target has no `pipeline.yml`, the runner will attempt to scaffold it via OpenCode; in `--no-strict-opencode` mode
-  it also seeds a minimal fallback contract so verification can proceed.
+- If a target has no `pipeline.yml`, the runner will attempt to scaffold it via OpenCode:
+  - `--strict-opencode` (default): no runner prewrite/fallback, only OpenCode or repo-preexisting files count.
+  - `--no-strict-opencode` (deprecated): kept for compatibility only; the runner no longer seeds or fallback-writes contract files.
 - Evaluation prefers **repo-owned doc/CI hints** (README / docs / workflows) rather than hand-written start commands.
 
 ## Command (example: GSM8K + EvalPlus + MiniWoB++)
@@ -43,6 +44,38 @@ python3 examples/verify_suite_single_file.py \
   --env AIDER_FSM_HINT_MAX_ATTEMPTS=5
 ```
 
+## Recommended verification matrix (smoke + full, strict)
+
+Use this matrix for regression coverage:
+
+1) **Smoke + strict**
+
+```bash
+python3 examples/verify_suite_single_file.py \
+  --targets-file benchmarks.txt \
+  --llm /abs/path/to/local_hf_model_dir \
+  --eval-mode smoke \
+  --require-samples \
+  --strict-opencode
+```
+
+2) **Full + strict**
+
+```bash
+python3 examples/verify_suite_single_file.py \
+  --targets-file benchmarks.txt \
+  --llm /abs/path/to/local_hf_model_dir \
+  --eval-mode full \
+  --require-samples \
+  --strict-opencode \
+  --env AIDER_FSM_MAX_CMD_SECONDS=14400 \
+  --env AIDER_FSM_HINT_TIMEOUT_SECONDS=14400
+```
+
+Notes:
+
+- `--no-strict-opencode` is deprecated and does not enable any runner-written fallback contracts.
+
 Notes:
 
 - For HF dataset snapshots, `AIDER_EVAL_LIMIT` controls how many test rows the built-in HF rollout will sample.
@@ -67,6 +100,8 @@ These artifacts include full stdout/stderr tails, per-stage summaries, and the p
 - `.aider_fsm/rollout.json` (+ referenced JSONL samples)
 - `.aider_fsm/metrics.json`
 - `.aider_fsm/hints_run.json` / `.aider_fsm/hints_used.json` (when hints are used)
+- `scaffold/scaffold_provenance.json` (who wrote which contract files during scaffold)
+- `repair_*/repair_provenance.json` (who wrote which files during repair)
 
 ## Example output (2026-02-06)
 

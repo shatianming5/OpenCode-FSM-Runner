@@ -2,10 +2,29 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
-from .hints_exec import run_hints
+# Support running either as a module (`python -m runner.generic_evaluation`) or as a
+# script (`python $AIDER_FSM_RUNNER_ROOT/runner/generic_evaluation.py`). The latter
+# avoids module-name collisions with target repos that may contain their own `runner/`
+# package.
+if __package__ in (None, ""):
+    _ROOT = Path(__file__).resolve().parents[1]
+    # Ensure runner root is first on sys.path to avoid collisions like having
+    # `$AIDER_FSM_RUNNER_ROOT/runner` earlier (which would import runner/runner.py
+    # as a top-level module and break relative imports).
+    root_s = str(_ROOT)
+    try:
+        while root_s in sys.path:
+            sys.path.remove(root_s)
+    except Exception:
+        pass
+    sys.path.insert(0, root_s)
+    from runner.hints_exec import run_hints  # type: ignore
+else:
+    from .hints_exec import run_hints
 
 
 def _is_truthy(value: str | None) -> bool:

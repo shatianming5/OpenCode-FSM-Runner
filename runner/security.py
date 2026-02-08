@@ -31,6 +31,8 @@ _SCRIPT_HARD_DENY_PATTERNS: tuple[str, ...] = (
     r"\brm\s+-rf\s+/\*\s*($|[;&|])",
     r"\brm\s+-rf\s+~\s*($|[;&|])",
     r"\brm\s+-rf\s+\$HOME\s*($|[;&|])",
+    # Runner evidence lives here; deleting it destroys debuggability and audit trails.
+    r"\brm\s+-rf\s+\.aider_fsm/artifacts\b",
     r":\(\)\s*\{\s*:\|\:\s*&\s*\}\s*;\s*:\s*",
 )
 

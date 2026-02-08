@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from runner.bootstrap import load_bootstrap_spec, run_bootstrap
+from runner.bootstrap import load_bootstrap_spec, load_bootstrap_spec_with_diagnostics, run_bootstrap
 
 
 def _py_cmd(code: str) -> str:
@@ -60,6 +60,36 @@ def test_load_bootstrap_spec_invalid_version(tmp_path: Path):
         load_bootstrap_spec(p)
 
 
+def test_load_bootstrap_spec_accepts_boot_wrapper_and_step_mappings(tmp_path: Path) -> None:
+    p = tmp_path / "bootstrap.yml"
+    p.write_text(
+        "\n".join(
+            [
+                "boot:",
+                "  version: 1",
+                "  steps:",
+                "    - run: echo one",
+                "    - cmd: echo two",
+                "  cwd: .",
+                "  timeout: 12",
+                "  retry: 1",
+                "  env:",
+                "    FOO: bar",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_bootstrap_spec_with_diagnostics(p)
+    assert loaded.spec.cmds == ["echo one", "echo two"]
+    assert loaded.spec.workdir == "."
+    assert loaded.spec.timeout_seconds == 12
+    assert loaded.spec.retries == 1
+    assert loaded.spec.env.get("FOO") == "bar"
+    assert any("boot_mapping_unwrapped" in w for w in loaded.warnings)
+    assert any("steps_alias_used" in w for w in loaded.warnings)
+
+
 def test_run_bootstrap_applies_env_and_runs_cmd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """中文说明：
     - 含义：验证 `run_bootstrap` 会应用 env（含变量展开）并执行 cmds。
@@ -98,3 +128,32 @@ def test_run_bootstrap_applies_env_and_runs_cmd(tmp_path: Path, monkeypatch: pyt
     assert stage.ok is True
     assert applied_env["FOO"] == "bar"
     assert applied_env["BAR"] == "bar-baz"
+
+
+def test_run_bootstrap_writes_parse_warnings_artifact(tmp_path: Path) -> None:
+    repo = tmp_path
+    (repo / ".aider_fsm").mkdir(parents=True, exist_ok=True)
+    bootstrap_path = repo / ".aider_fsm" / "bootstrap.yml"
+    bootstrap_path.write_text(
+        "\n".join(
+            [
+                "boot:",
+                "  version: 1",
+                "  steps:",
+                "    - echo ok",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    stage, _env = run_bootstrap(
+        repo,
+        bootstrap_path=bootstrap_path,
+        pipeline=None,
+        unattended="strict",
+        artifacts_dir=repo / "artifacts",
+    )
+    assert stage.ok is True
+    warns = repo / "artifacts" / "bootstrap_parse_warnings.json"
+    assert warns.exists()

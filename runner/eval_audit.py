@@ -43,6 +43,9 @@ def _looks_like_python_exec(line_lower: str) -> bool:
     s = line_lower.replace('"', "").replace("'", "").strip()
     if not s:
         return False
+    # Accept common shell exec prefix (e.g., `exec "$PY" -m ...`).
+    if s.startswith("exec "):
+        s = s[len("exec ") :].strip()
     # Common heredoc pattern for embedded python:
     #   "$PY" - <<'PY'
     #   python3 - <<PY
@@ -50,7 +53,8 @@ def _looks_like_python_exec(line_lower: str) -> bool:
         if "<<" in s and ("<<py" in s or "<<-py" in s or "<<\tpy" in s or "<< 'py'" in s or "<<'py'" in s):
             if "python" in s or "$py" in s or "$aider_fsm_python" in s:
                 return True
-    if s.startswith("$aider_fsm_python") or s.startswith("python3") or s.startswith("python"):
+    # Accept `$AIDER_FSM_PYTHON` and also wrapper vars like `$PYTHON`.
+    if s.startswith("$") or s.startswith("python3") or s.startswith("python"):
         if " -m " in s:
             return True
         if " -c " in s:
@@ -141,6 +145,10 @@ def audit_eval_script_mentions_any_anchor(repo: Path, anchors: list[str]) -> str
     # Accept the generic helper-based implementation: anchors are enforced via hints_used.json validation.
     low_all = text.lower()
     if "runner.generic_evaluation" in low_all or "runner.hints_exec" in low_all:
+        return None
+    # Also accept the script-path invocation form which avoids `runner` module name
+    # collisions with target repos that contain their own `runner/` package.
+    if "aider_fsm_runner_root" in low_all and "generic_evaluation.py" in low_all:
         return None
 
     non_exec_prefixes = (

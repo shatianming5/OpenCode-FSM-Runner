@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
+from .contract_provenance import build_contract_provenance_report, dump_provenance, snapshot_contract_files
 from .opencode_client import OpenCodeClient
+from .pipeline_spec import load_pipeline_spec
+from .scaffold_validation import validate_scaffold_contract
 from .subprocess_utils import tail
 
 
@@ -12,6 +16,77 @@ def _read_text_tail(path: Path, *, n: int) -> str:
         return tail(path.read_text(encoding="utf-8", errors="replace"), n)
     except Exception:
         return ""
+
+
+def _build_contract_validation_snapshot(repo: Path) -> str:
+    """Best-effort snapshot of current scaffold contract validity for repair prompts."""
+    repo = Path(repo).resolve()
+    pipeline_path = (repo / "pipeline.yml").resolve()
+    if not pipeline_path.exists():
+        return "pipeline.yml_missing"
+    try:
+        pipeline = load_pipeline_spec(pipeline_path)
+    except Exception as e:
+        return f"pipeline_parse_error: {e}"
+    try:
+        report = validate_scaffold_contract(repo, pipeline=pipeline, require_metrics=True)
+    except Exception as e:
+        return f"contract_validation_failed: {e}"
+    payload = {
+        "ok": bool(report.ok),
+        "errors": list(report.errors),
+        "warnings": list(report.warnings or []),
+    }
+    try:
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+    except Exception:
+        text = str(payload)
+    return tail(text, 8000)
+
+
+def _bootstrap_artifacts_tail(deploy_artifacts_dir: Path) -> str:
+    """Best-effort: extract the most relevant bootstrap failure details from artifacts.
+
+    Note: bootstrap failures happen before deploy_setup.sh runs, so deploy_setup_stderr.txt
+    is often empty/missing. Showing the failing bootstrap cmd helps the repair agent
+    remove/adjust the problematic bootstrap steps.
+    """
+    deploy_artifacts_dir = Path(deploy_artifacts_dir).resolve()
+    bdir = (deploy_artifacts_dir / "bootstrap").resolve()
+    if not bdir.exists():
+        return ""
+
+    chunks: list[str] = []
+    summary = _read_text_tail(bdir / "bootstrap_summary.json", n=2000).strip()
+    if summary:
+        chunks.append("bootstrap_summary.json:\n" + summary)
+
+    stderr_paths: list[Path] = []
+    try:
+        stderr_paths = [p for p in bdir.glob("bootstrap_cmd*_try*_stderr.txt") if p.is_file()]
+    except Exception:
+        stderr_paths = []
+
+    def _mtime(p: Path) -> float:
+        try:
+            return float(p.stat().st_mtime)
+        except Exception:
+            return 0.0
+
+    if stderr_paths:
+        newest = sorted(stderr_paths, key=lambda p: (_mtime(p), p.name), reverse=True)[0]
+        base = newest.name[: -len("_stderr.txt")] if newest.name.endswith("_stderr.txt") else newest.name
+        cmd_tail = _read_text_tail(bdir / f"{base}_cmd.txt", n=2000).strip()
+        out_tail = _read_text_tail(bdir / f"{base}_stdout.txt", n=4000).strip()
+        err_tail = _read_text_tail(bdir / f"{base}_stderr.txt", n=4000).strip()
+        if cmd_tail:
+            chunks.append("failing_bootstrap_cmd:\n" + cmd_tail)
+        if out_tail:
+            chunks.append("failing_bootstrap_stdout_tail:\n" + out_tail)
+        if err_tail:
+            chunks.append("failing_bootstrap_stderr_tail:\n" + err_tail)
+
+    return ("\n\n".join(chunks) + "\n") if chunks else ""
 
 
 def repair_contract(
@@ -24,9 +99,15 @@ def repair_contract(
     failed_stage: str,
     deploy_artifacts_dir: Path,
     rollout_eval_artifacts_dir: Path,
+    llm_kind: str | None = None,
+    llm_model: str | None = None,
     command_hints: list[str] | None = None,
     extra_context: str = "",
     timeout_seconds: int = 300,
+    retry_attempts: int = 2,
+    retry_backoff_seconds: float = 2.0,
+    context_length: int | None = None,
+    max_prompt_chars: int | None = None,
 ) -> None:
     """Ask OpenCode to repair the repo-local contract under `.aider_fsm/` (best-effort).
 
@@ -48,24 +129,37 @@ def repair_contract(
         model=str(model or "").strip(),
         base_url=(str(opencode_url or "").strip() or None),
         timeout_seconds=int(timeout_seconds or 300),
+        request_retry_attempts=int(retry_attempts or 0),
+        request_retry_backoff_seconds=float(retry_backoff_seconds or 0.0),
+        context_length=(int(context_length) if context_length is not None else None),
+        max_prompt_chars=(int(max_prompt_chars) if max_prompt_chars is not None else None),
         bash_mode="restricted",
-        scaffold_bash_mode="full",
+        scaffold_bash_mode="restricted",
         unattended=str(unattended or "strict"),
         server_log_path=artifacts_dir / "opencode_server.log",
         session_title=f"{repo.name}:repair",
         username=oc_username,
         password=oc_password,
     )
+    contract_before = snapshot_contract_files(repo)
+    tool_trace: list[dict[str, object]] | None = None
     try:
-        deploy_err = _read_text_tail(deploy_artifacts_dir / "deploy_setup_stderr.txt", n=4000)
+        deploy_setup_out = _read_text_tail(deploy_artifacts_dir / "deploy_setup_stdout.txt", n=4000)
+        deploy_setup_err = _read_text_tail(deploy_artifacts_dir / "deploy_setup_stderr.txt", n=4000)
+        deploy_health_out = _read_text_tail(deploy_artifacts_dir / "deploy_health_stdout.txt", n=4000)
+        deploy_health_err = _read_text_tail(deploy_artifacts_dir / "deploy_health_stderr.txt", n=4000)
+        bootstrap_artifacts = _bootstrap_artifacts_tail(deploy_artifacts_dir)
         rollout_err = _read_text_tail(rollout_eval_artifacts_dir / "rollout_stderr.txt", n=4000)
         eval_err = _read_text_tail(rollout_eval_artifacts_dir / "evaluation_stderr.txt", n=4000)
+        contract_validation = _build_contract_validation_snapshot(repo)
         # When evaluation uses `runner.generic_evaluation`, the real failure reason is typically
         # recorded in `.aider_fsm/hints_run.json` rather than evaluation_stderr.txt.
         hints_run_preview = _read_text_tail(repo / ".aider_fsm" / "hints_run.json", n=6000)
         hints_used_preview = _read_text_tail(repo / ".aider_fsm" / "hints_used.json", n=3000)
         bootstrap_preview = _read_text_tail(repo / ".aider_fsm" / "bootstrap.yml", n=3000)
         deploy_setup_sh = _read_text_tail(repo / ".aider_fsm" / "stages" / "deploy_setup.sh", n=4000)
+        deploy_health_sh = _read_text_tail(repo / ".aider_fsm" / "stages" / "deploy_health.sh", n=2000)
+        deploy_teardown_sh = _read_text_tail(repo / ".aider_fsm" / "stages" / "deploy_teardown.sh", n=2000)
         rollout_sh = _read_text_tail(repo / ".aider_fsm" / "stages" / "rollout.sh", n=4000)
         evaluation_sh = _read_text_tail(repo / ".aider_fsm" / "stages" / "evaluation.sh", n=4000)
         runtime_env_preview = _read_text_tail(repo / ".aider_fsm" / "runtime_env.json", n=2000)
@@ -90,6 +184,15 @@ def repair_contract(
             "\n"
             "Goal: fix the repo-local contract so the runner can execute deploy -> rollout -> evaluation without errors.\n"
             "\n"
+            "Tool usage (REQUIRED):\n"
+            "- You MUST implement changes by emitting REAL OpenCode XML tool calls. Do NOT just describe edits.\n"
+            "- Do NOT wrap tool calls in markdown fences.\n"
+            "- Supported formats:\n"
+            "  - Read:  <read filePath=\"...\" />\n"
+            "  - Write: <write filePath=\"...\">...content...</write>\n"
+            "  - Edit:  <edit filePath=\"...\" oldString=\"...\" newString=\"...\" />\n"
+            "  - Bash:  <bash command=\"...\" description=\"...\" />\n"
+            "\n"
             "Hard constraints:\n"
             "1) You may ONLY write files under `.aider_fsm/`.\n"
             "2) Do NOT modify `pipeline.yml`.\n"
@@ -97,6 +200,8 @@ def repair_contract(
             "4) Do NOT use `sed -i` (not portable).\n"
             "5) If you embed python via heredoc, do NOT rely on sys.argv and NEVER put shell args after the heredoc terminator.\n"
             "6) If you need Python, you MUST use `$AIDER_FSM_PYTHON` (preferred) or `python3`. Do NOT call `python`.\n"
+            "7) Do NOT use `&>/dev/null` (it is prone to escaping/corruption). Use `>/dev/null 2>&1` or `2>/dev/null`.\n"
+            "8) Do NOT delete or rewrite `.aider_fsm/artifacts/**` or `.aider_fsm/venv/**` (keep evidence + avoid cache churn).\n"
             "\n"
             "Contract requirements:\n"
             "- deploy must write `.aider_fsm/runtime_env.json` (JSON object)\n"
@@ -111,7 +216,9 @@ def repair_contract(
             "    - `reason`: string (required when ok=false)\n"
             "  If no hinted/official command can run, set ok=false with a clear reason and EXIT NON-ZERO.\n"
             "- Preferred benchmark-agnostic evaluation implementation: call the built-in helper in evaluation.sh:\n"
-            "    `$AIDER_FSM_PYTHON -m runner.generic_evaluation`\n"
+            "    `$AIDER_FSM_PYTHON \"$AIDER_FSM_RUNNER_ROOT/runner/generic_evaluation.py\"`\n"
+            "  IMPORTANT: this helper script does NOT take CLI flags; it reads inputs from env vars only. Do NOT pass `--runtime-env`/`--metrics-json` etc.\n"
+            "  IMPORTANT: the helper scripts live under `$AIDER_FSM_RUNNER_ROOT/runner/` (do NOT reference `$AIDER_FSM_RUNNER_ROOT/.aider_fsm/...`).\n"
             "  It already executes `AIDER_FSM_HINTS_JSON` safely, writes `hints_used.json` + `metrics.json`, and exits non-zero when required hints fail.\n"
             "  Do NOT hand-roll JSON parsing of hint env vars (easy to get wrong).\n"
             "- If hinted/official commands fail due to missing deps, import errors, or version mismatches, DO NOT fake success.\n"
@@ -129,21 +236,24 @@ def repair_contract(
             "      - .aider_fsm/venv/bin/pip install -e .\n"
             "    env:\n"
             "      PATH: \".aider_fsm/venv/bin:$PATH\"\n"
-            "  If you see `ValueError: Incompatible Language version ...` coming from tree-sitter,\n"
-            "  it is usually a dependency mismatch between `tree_sitter` and `tree-sitter-python`.\n"
-            "  Fix it in bootstrap.yml by pinning compatible versions in the venv before running the hinted command.\n"
-            "  Known-good pair (example): `tree_sitter==0.22.0` and `tree-sitter-python==0.21.0`.\n"
+            "  If (and only if) you see a tree-sitter language/version mismatch error,\n"
+            "  fix it in bootstrap.yml by pinning compatible versions in the venv before running the hinted command.\n"
+            "  Prefer versions that have wheels for your Python version; avoid source builds when possible.\n"
+            "  If `pip install ...` fails with `No matching distribution found`, do NOT keep guessing random package names/versions.\n"
+            "  Either remove the unnecessary dependency, install without pinning, or pick a version that actually exists (pip often prints a list).\n"
             "- NEVER set `ok=true` unless the evaluation actually ran and succeeded.\n"
             "- NEVER hardcode a non-zero score. Derive the score from real execution outputs.\n"
             "- NOTE: the runner audits `.aider_fsm/stages/evaluation.sh` and will reject hardcoded non-zero scores and proxy/no-op evaluations.\n"
             "- rollout MUST also write a samples JSONL file under `$AIDER_FSM_ARTIFACTS_DIR` and include its path in `rollout.json.paths.samples_jsonl`.\n"
             "  Each JSONL line must be an object with keys: `prompt` (string), `completion` (string), `reward` (number).\n"
+            "  At least one sample line MUST have a non-empty `completion` (non-whitespace), or the rollout contract will fail.\n"
             "- IMPORTANT: if [EXTRA_CONTEXT] mentions `hf_qa_samples_too_few` OR `hf_qa_prompts_not_anchored`, this target is an HF QA snapshot.\n"
             "  Rollout MUST:\n"
             "  - generate at least N valid samples if N is specified (and have prompt diversity)\n"
             "  - anchor prompts to the HF test parquet questions (i.e., include the real question text; do NOT synthesize unrelated tasks)\n"
             "  In this case, do NOT hand-roll placeholder sample generators.\n"
-            "  Preferred benchmark-agnostic fix: call the built-in helper (recommended): `$AIDER_FSM_PYTHON -m runner.generic_rollout`.\n"
+            "  Preferred benchmark-agnostic fix: call the built-in helper (recommended): `$AIDER_FSM_PYTHON \"$AIDER_FSM_RUNNER_ROOT/runner/generic_rollout.py\"`.\n"
+            "  IMPORTANT: this helper script does NOT take CLI flags; it reads inputs from env vars only.\n"
             "  It already handles HF QA snapshots and respects `AIDER_EVAL_MODE` / `AIDER_EVAL_LIMIT`.\n"
             "- If a hinted/official command fails due to permission errors writing outputs (e.g., cannot create a results directory),\n"
             "  redirect its outputs to a writable location under `$AIDER_FSM_ARTIFACTS_DIR` (or `.aider_fsm/`).\n"
@@ -152,14 +262,38 @@ def repair_contract(
             "- If you use an OpenAI-compatible client library that requires an API key, DO NOT embed secrets in files. Instead, read it from env (e.g. OPENAI_API_KEY) and fail clearly if missing.\n"
             "- deploy_teardown should stop any started services/containers (best-effort)\n"
             "\n"
+            "[LLM_RUNTIME]\n"
+            f"AIDER_LLM_KIND: {str(llm_kind or '')}\n"
+            f"AIDER_LLM_MODEL: {str(llm_model or '')}\n"
+            "\n"
+            "NOTE:\n"
+            "- If `AIDER_LLM_KIND=remote`, deploy MUST NOT require a local server. It should write runtime_env.json with `inference.type=openai_compat`\n"
+            "  and pass health checks without server.pid.\n"
+            "- If `AIDER_LLM_KIND=local_hf`, deploy may start a local OpenAI-compatible server and record its base_url + pid.\n"
+            "\n"
             f"FAILED_STAGE: {failed_stage}\n"
             f"REPO_ROOT: {repo}\n"
             f"DEPLOY_ARTIFACTS_DIR: {deploy_artifacts_dir}\n"
             f"ROLLOUT_EVAL_ARTIFACTS_DIR: {rollout_eval_artifacts_dir}\n"
             f"{hints_block}"
             "\n"
+            "[CONTRACT_VALIDATION_SNAPSHOT]\n"
+            f"{contract_validation}\n"
+            "\n"
             "[DEPLOY_SETUP_STDERR_TAIL]\n"
-            f"{deploy_err}\n"
+            f"{deploy_setup_err}\n"
+            "\n"
+            "[DEPLOY_SETUP_STDOUT_TAIL]\n"
+            f"{deploy_setup_out}\n"
+            "\n"
+            "[DEPLOY_HEALTH_STDERR_TAIL]\n"
+            f"{deploy_health_err}\n"
+            "\n"
+            "[DEPLOY_HEALTH_STDOUT_TAIL]\n"
+            f"{deploy_health_out}\n"
+            "\n"
+            "[BOOTSTRAP_ARTIFACTS_TAIL]\n"
+            f"{bootstrap_artifacts}\n"
             "\n"
             "[ROLLOUT_STDERR_TAIL]\n"
             f"{rollout_err}\n"
@@ -179,6 +313,12 @@ def repair_contract(
             "[DEPLOY_SETUP_SH_TAIL]\n"
             f"{deploy_setup_sh}\n"
             "\n"
+            "[DEPLOY_HEALTH_SH_TAIL]\n"
+            f"{deploy_health_sh}\n"
+            "\n"
+            "[DEPLOY_TEARDOWN_SH_TAIL]\n"
+            f"{deploy_teardown_sh}\n"
+            "\n"
             "[ROLLOUT_SH_TAIL]\n"
             f"{rollout_sh}\n"
             "\n"
@@ -196,12 +336,47 @@ def repair_contract(
         )
         try:
             res = agent.run(prompt, fsm_state="S_REPAIR", iter_idx=0, purpose="repair_contract")
-            (artifacts_dir / "repair_agent_result.txt").write_text(tail(res.assistant_text or "", 20000) + "\n", encoding="utf-8")
+            tool_trace = [dict(x) for x in (res.tool_trace or []) if isinstance(x, dict)]
+            # The agent may mutate `.aider_fsm/**` (including artifacts); keep runner reporting best-effort.
+            try:
+                artifacts_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            try:
+                (artifacts_dir / "repair_agent_result.txt").write_text(
+                    tail(res.assistant_text or "", 20000) + "\n", encoding="utf-8"
+                )
+            except Exception:
+                pass
         except Exception as e:
             # A timeout/error might still have produced partial file writes.
-            (artifacts_dir / "repair_agent_error.txt").write_text(tail(str(e), 4000) + "\n", encoding="utf-8")
+            try:
+                artifacts_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            try:
+                (artifacts_dir / "repair_agent_error.txt").write_text(tail(str(e), 4000) + "\n", encoding="utf-8")
+            except Exception:
+                pass
             return
     finally:
+        try:
+            try:
+                artifacts_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            report = build_contract_provenance_report(
+                repo=repo,
+                purpose="repair_contract",
+                strict_opencode=True,
+                before=contract_before,
+                after=snapshot_contract_files(repo),
+                tool_trace=tool_trace,
+                runner_written_paths=set(),
+            )
+            dump_provenance(artifacts_dir / "repair_provenance.json", report)
+        except Exception:
+            pass
         try:
             agent.close()
         except Exception:

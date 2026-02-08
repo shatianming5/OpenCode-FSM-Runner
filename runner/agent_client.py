@@ -14,6 +14,7 @@ class AgentResult:
 
     assistant_text: str
     raw: Any | None = None
+    tool_trace: list[dict[str, Any]] | None = None
 
 
 class AgentClient(Protocol):

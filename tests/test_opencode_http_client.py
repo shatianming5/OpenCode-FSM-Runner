@@ -6,7 +6,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
-from runner.opencode_client import OpenCodeClient
+import pytest
+
+from runner.opencode_client import OpenCodeClient, OpenCodeRequestError
 
 
 @dataclass
@@ -19,6 +21,10 @@ class _ServerState:
 
     expected_auth: str
     requests: list[dict[str, Any]] = field(default_factory=list)
+    fail_message_once_with_503: bool = False
+    reject_context_once: bool = False
+    message_returns_empty_once: bool = False
+    message_calls: int = 0
 
 
 def _make_handler(state: _ServerState):
@@ -108,6 +114,25 @@ def _make_handler(state: _ServerState):
                 self._write_json(200, {"id": "s1"})
                 return
             if self.path == "/session/s1/message":
+                state.message_calls += 1
+                if state.message_returns_empty_once and state.message_calls == 1:
+                    # Simulate a buggy/empty transport: 200 OK but no JSON body.
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                if state.fail_message_once_with_503 and state.message_calls == 1:
+                    self._write_json(503, {"error": "try_again"})
+                    return
+                if (
+                    state.reject_context_once
+                    and state.message_calls == 1
+                    and isinstance(body, dict)
+                    and body.get("contextLength") is not None
+                ):
+                    self._write_json(422, {"error": "invalid_context_length"})
+                    return
                 # Minimal contract check.
                 assert isinstance(body, dict)
                 assert isinstance(body.get("parts"), list)
@@ -183,3 +208,211 @@ def test_opencode_client_http_happy_path(tmp_path: Path):
     assert ("GET", "/global/health") in paths
     assert ("POST", "/session") in paths
     assert ("POST", "/session/s1/message") in paths
+
+
+def test_opencode_client_retries_transient_503(tmp_path: Path):
+    user = "u"
+    pwd = "p"
+    token = base64.b64encode(f"{user}:{pwd}".encode("utf-8")).decode("ascii")
+    expected_auth = f"Basic {token}"
+    state = _ServerState(expected_auth=expected_auth, fail_message_once_with_503=True)
+
+    server = HTTPServer(("127.0.0.1", 0), _make_handler(state))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        client = OpenCodeClient(
+            repo=tmp_path,
+            plan_rel="PLAN.md",
+            pipeline_rel="pipeline.yml",
+            model="openai/gpt-4o-mini",
+            base_url=f"http://{host}:{port}",
+            timeout_seconds=5,
+            request_retry_attempts=2,
+            request_retry_backoff_seconds=0.01,
+            bash_mode="restricted",
+            unattended="strict",
+            username=user,
+            password=pwd,
+            session_title="t-retry",
+        )
+        try:
+            res = client.run("hi", fsm_state="S2_PLAN_UPDATE", iter_idx=1, purpose="plan_update_attempt_1")
+            assert res.assistant_text.strip() == "hello"
+        finally:
+            client.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    message_posts = [r for r in state.requests if r.get("method") == "POST" and r.get("path") == "/session/s1/message"]
+    assert len(message_posts) == 2
+
+
+def test_opencode_client_retries_empty_message_body(tmp_path: Path):
+    """If OpenCode returns 200 with an empty body, the client should treat it as a transient failure and retry."""
+    user = "u"
+    pwd = "p"
+    token = base64.b64encode(f"{user}:{pwd}".encode("utf-8")).decode("ascii")
+    expected_auth = f"Basic {token}"
+    state = _ServerState(expected_auth=expected_auth, message_returns_empty_once=True)
+
+    server = HTTPServer(("127.0.0.1", 0), _make_handler(state))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        client = OpenCodeClient(
+            repo=tmp_path,
+            plan_rel="PLAN.md",
+            pipeline_rel="pipeline.yml",
+            model="openai/gpt-4o-mini",
+            base_url=f"http://{host}:{port}",
+            timeout_seconds=5,
+            request_retry_attempts=2,
+            request_retry_backoff_seconds=0.01,
+            bash_mode="restricted",
+            unattended="strict",
+            username=user,
+            password=pwd,
+            session_title="t-empty",
+        )
+        try:
+            res = client.run("hi", fsm_state="S2_PLAN_UPDATE", iter_idx=1, purpose="plan_update_attempt_1")
+            assert res.assistant_text.strip() == "hello"
+        finally:
+            client.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_opencode_client_context_length_fallback_and_prompt_clip(tmp_path: Path):
+    user = "u"
+    pwd = "p"
+    token = base64.b64encode(f"{user}:{pwd}".encode("utf-8")).decode("ascii")
+    expected_auth = f"Basic {token}"
+    state = _ServerState(expected_auth=expected_auth, reject_context_once=True)
+
+    server = HTTPServer(("127.0.0.1", 0), _make_handler(state))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        client = OpenCodeClient(
+            repo=tmp_path,
+            plan_rel="PLAN.md",
+            pipeline_rel="pipeline.yml",
+            model="openai/gpt-4o-mini",
+            base_url=f"http://{host}:{port}",
+            timeout_seconds=5,
+            request_retry_attempts=1,
+            request_retry_backoff_seconds=0.01,
+            context_length=8192,
+            max_prompt_chars=120,
+            bash_mode="restricted",
+            unattended="strict",
+            username=user,
+            password=pwd,
+            session_title="t-context",
+        )
+        try:
+            long_prompt = "x" * 500
+            res = client.run(long_prompt, fsm_state="S2_PLAN_UPDATE", iter_idx=1, purpose="plan_update_attempt_1")
+            assert res.assistant_text.strip() == "hello"
+        finally:
+            client.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    message_posts = [r for r in state.requests if r.get("method") == "POST" and r.get("path") == "/session/s1/message"]
+    assert len(message_posts) == 2
+    first_body = message_posts[0]["body"]
+    second_body = message_posts[1]["body"]
+    assert isinstance(first_body, dict)
+    assert isinstance(second_body, dict)
+    assert first_body.get("contextLength") == 8192
+    assert "contextLength" not in second_body
+
+    first_text = (((first_body.get("parts") or [{}])[0]).get("text") if isinstance(first_body.get("parts"), list) else "") or ""
+    assert isinstance(first_text, str)
+    assert len(first_text) <= 120
+
+
+def test_post_message_retry_recovers_local_transport_error() -> None:
+    client = OpenCodeClient.__new__(OpenCodeClient)
+    client._request_retry_attempts = 2
+    client._request_retry_backoff_seconds = 0.0
+    client._session_recover_attempts = 1
+    client._session_recover_backoff_seconds = 0.0
+    client._context_length = None
+    client._owns_local_server = True
+
+    calls = {"post": 0, "recover": 0}
+
+    def fake_post(*, model: Any, text: str, include_context: bool = True) -> Any:
+        calls["post"] += 1
+        if calls["post"] == 1:
+            raise OpenCodeRequestError(
+                method="POST",
+                url="http://127.0.0.1:1/session/s1/message",
+                status=None,
+                detail="urlopen error [Errno 111] Connection refused",
+            )
+        return {"parts": [{"type": "text", "text": "ok"}]}
+
+    def fake_recover(*, reason: str) -> None:
+        calls["recover"] += 1
+
+    client._post_message = fake_post
+    client._recover_local_server_session = fake_recover
+    client._sleep_retry_backoff = lambda **_kwargs: None
+    client._sleep_session_recover_backoff = lambda **_kwargs: None
+    client._should_retry_request_error = lambda _err: True
+
+    out = OpenCodeClient._post_message_with_retry(client, model={"providerID": "openai", "modelID": "gpt-4o-mini"}, text="hi")
+    assert isinstance(out, dict)
+    assert calls["recover"] == 1
+    assert calls["post"] == 2
+
+
+def test_post_message_retry_does_not_recover_for_external_server() -> None:
+    client = OpenCodeClient.__new__(OpenCodeClient)
+    client._request_retry_attempts = 1
+    client._request_retry_backoff_seconds = 0.0
+    client._session_recover_attempts = 3
+    client._session_recover_backoff_seconds = 0.0
+    client._context_length = None
+    client._owns_local_server = False
+
+    calls = {"recover": 0}
+
+    def fake_post(*, model: Any, text: str, include_context: bool = True) -> Any:
+        raise OpenCodeRequestError(
+            method="POST",
+            url="http://example.com/session/s1/message",
+            status=None,
+            detail="urlopen error [Errno 111] Connection refused",
+        )
+
+    def fake_recover(*, reason: str) -> None:
+        calls["recover"] += 1
+
+    client._post_message = fake_post
+    client._recover_local_server_session = fake_recover
+    client._sleep_retry_backoff = lambda **_kwargs: None
+    client._sleep_session_recover_backoff = lambda **_kwargs: None
+    client._should_retry_request_error = lambda _err: False
+
+    with pytest.raises(OpenCodeRequestError):
+        OpenCodeClient._post_message_with_retry(
+            client,
+            model={"providerID": "openai", "modelID": "gpt-4o-mini"},
+            text="hi",
+        )
+    assert calls["recover"] == 0

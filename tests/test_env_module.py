@@ -200,8 +200,11 @@ def test_env_module_deploy_rollout_evaluation_smoke(tmp_path: Path):
     assert "paths" in rollout_obj
 
 
-def test_env_module_rollout_evaluation_remote_llm_smoke(tmp_path: Path):
+def test_env_module_rollout_evaluation_remote_llm_smoke(tmp_path: Path, monkeypatch):
     import env
+
+    monkeypatch.setenv("OPENAI_API_BASE", "https://api.example.test/v1")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
 
     repo = tmp_path / "repo"
     (repo / ".aider_fsm" / "stages").mkdir(parents=True)
@@ -220,6 +223,8 @@ def test_env_module_rollout_evaluation_remote_llm_smoke(tmp_path: Path):
         "RUNTIME_ENV_JSON=\"${AIDER_RUNTIME_ENV_PATH:-.aider_fsm/runtime_env.json}\"\n"
         "test \"${AIDER_LLM_KIND:-}\" = \"remote\" || (echo \"expected remote\" >&2; exit 2)\n"
         "test -n \"${AIDER_LLM_MODEL:-}\" || (echo \"missing AIDER_LLM_MODEL\" >&2; exit 2)\n"
+        "test -n \"${OPENAI_BASE_URL:-}\" || (echo \"missing OPENAI_BASE_URL\" >&2; exit 2)\n"
+        "test \"${OPENAI_BASE_URL:-}\" = \"${OPENAI_API_BASE:-}\" || (echo \"base url mismatch\" >&2; exit 2)\n"
         "\"$AIDER_FSM_PYTHON\" - <<'PY' > \"$RUNTIME_ENV_JSON\"\n"
         "import json, os, time\n"
         "obj = {\n"

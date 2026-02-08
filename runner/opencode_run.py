@@ -249,6 +249,15 @@ def main(argv: list[str] | None = None) -> int:
         help="require evaluation metrics JSON with required keys (default: true)",
     )
     parser.add_argument(
+        "--strict-opencode",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "strict scaffold mode (compat flag). "
+            "Runner no longer prewrites/fallback-writes scaffold files; contract files must be produced by OpenCode/repo."
+        ),
+    )
+    parser.add_argument(
         "--teardown",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -314,6 +323,8 @@ def main(argv: list[str] | None = None) -> int:
             model=str(args.model or ""),
             opencode_url=str(args.opencode_url or ""),
             unattended=str(args.unattended or "strict"),
+            seed_stage_skeleton=not bool(args.strict_opencode),
+            write_fallback_pipeline_yml=not bool(args.strict_opencode),
         )
     except Exception as e:
         print(f"ERROR: failed to open env: {e}", file=sys.stderr)

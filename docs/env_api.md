@@ -28,8 +28,15 @@ The runner itself stays benchmark-agnostic. The *target* repo is responsible for
   - `.aider_fsm/rollout.json` + `rollout.json.paths.samples_jsonl`
   - `.aider_fsm/metrics.json` (must include `ok` and `score` when required)
 
-If `pipeline.yml` is missing, `env.setup()` will **scaffold** a minimal contract via OpenCode, and/or seed a generic fallback
-when `strict_opencode=False`.
+If `pipeline.yml` is missing, `env.setup()` will scaffold a minimal contract via OpenCode:
+
+- `strict_opencode=True` (default): runner does **not** prewrite/patch contract files; success requires OpenCode (or repo-preexisting files) to produce a valid contract.
+- `strict_opencode=False` (deprecated): kept for compatibility only. The runner still does **not** prewrite/seed/fallback-write contract files.
+
+Scaffold provenance is recorded at:
+
+- `<artifacts>/scaffold/scaffold_provenance.json`
+- `<artifacts>/repair_*/repair_provenance.json` (when repair runs)
 
 See: `docs/pipeline_spec.md`, `docs/metrics_schema.md`.
 
@@ -117,7 +124,7 @@ Then, evaluation is expected to run at least one hinted/official command and wri
   - `commands`: attempted commands (recommended)
   - `reason`: required when `ok=false`
 
-Generic helper used by fallback contracts:
+Generic helper used by scaffolded contracts:
 
 - `runner.generic_evaluation` runs hints via `runner.hints_exec.run_hints()` and writes:
   - `.aider_fsm/hints_run.json` (debug details)

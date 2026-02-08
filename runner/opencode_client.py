@@ -20,6 +20,27 @@ from .opencode_tooling import ToolPolicy, execute_tool_calls, format_tool_result
 from .subprocess_utils import tail
 
 
+def _looks_like_transport_unavailable(detail: str) -> bool:
+    """Best-effort classification for transient transport failures."""
+    d = str(detail or "").strip().lower()
+    if not d:
+        return False
+    needles = (
+        "connection refused",
+        "failed to establish a new connection",
+        "connection reset",
+        "connection aborted",
+        "connection closed",
+        "remote end closed",
+        "network is unreachable",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "timed out",
+        "timeout",
+    )
+    return any(n in d for n in needles)
+
+
 def _normalize_base_url(url: str) -> str:
     """中文说明：
     - 含义：规范化 OpenCode server base URL（去掉末尾 `/`，并拒绝空字符串）。
@@ -168,6 +189,12 @@ class OpenCodeClient(AgentClient):
         model: str,
         base_url: str | None,
         timeout_seconds: int,
+        request_retry_attempts: int = 2,
+        request_retry_backoff_seconds: float = 2.0,
+        session_recover_attempts: int | None = None,
+        session_recover_backoff_seconds: float | None = None,
+        context_length: int | None = None,
+        max_prompt_chars: int | None = None,
         bash_mode: str,
         scaffold_bash_mode: str = "full",
         unattended: str,
@@ -185,6 +212,40 @@ class OpenCodeClient(AgentClient):
         self._plan_rel = str(plan_rel or "PLAN.md").strip() or "PLAN.md"
         self._pipeline_rel = str(pipeline_rel).strip() if pipeline_rel else None
         self._timeout_seconds = int(timeout_seconds) if timeout_seconds else 300
+        self._request_retry_attempts = max(0, int(request_retry_attempts or 0))
+        try:
+            _backoff = float(request_retry_backoff_seconds)
+        except Exception:
+            _backoff = 2.0
+        self._request_retry_backoff_seconds = max(0.0, _backoff)
+        _recover_attempts_raw = (
+            session_recover_attempts
+            if session_recover_attempts is not None
+            else os.environ.get("AIDER_OPENCODE_SESSION_RECOVER_ATTEMPTS", "2")
+        )
+        try:
+            self._session_recover_attempts = max(0, int(_recover_attempts_raw or 0))
+        except Exception:
+            self._session_recover_attempts = 2
+        _recover_backoff_raw = (
+            session_recover_backoff_seconds
+            if session_recover_backoff_seconds is not None
+            else os.environ.get("AIDER_OPENCODE_SESSION_RECOVER_BACKOFF_SECONDS", "2.0")
+        )
+        try:
+            self._session_recover_backoff_seconds = max(0.0, float(_recover_backoff_raw or 0.0))
+        except Exception:
+            self._session_recover_backoff_seconds = 2.0
+        try:
+            _context_length = int(context_length or 0)
+        except Exception:
+            _context_length = 0
+        self._context_length: int | None = _context_length if _context_length > 0 else None
+        try:
+            _max_prompt_chars = int(max_prompt_chars or 0)
+        except Exception:
+            _max_prompt_chars = 0
+        self._max_prompt_chars: int | None = _max_prompt_chars if _max_prompt_chars > 0 else None
         self._bash_mode = (bash_mode or "restricted").strip().lower()
         if self._bash_mode not in ("restricted", "full"):
             raise ValueError("invalid_bash_mode")
@@ -192,6 +253,8 @@ class OpenCodeClient(AgentClient):
         if self._scaffold_bash_mode not in ("restricted", "full"):
             raise ValueError("invalid_scaffold_bash_mode")
         self._unattended = str(unattended or "strict").strip().lower() or "strict"
+        self._session_title = str(session_title or f"runner:{repo.name}")
+        self._server_log_path = server_log_path.resolve() if server_log_path is not None else None
 
         provider_id, model_id = _split_model(model)
         self._model_obj: dict[str, str] = {"providerID": provider_id, "modelID": model_id}
@@ -199,6 +262,7 @@ class OpenCodeClient(AgentClient):
 
         self._proc: subprocess.Popen[str] | None = None
         self._server_log_file = None
+        self._owns_local_server = not bool(base_url)
 
         if base_url:
             self._server = OpenCodeServerConfig(
@@ -208,12 +272,12 @@ class OpenCodeClient(AgentClient):
             )
         else:
             self._server = self._start_local_server(
-                repo=repo, server_log_path=server_log_path, username=username
+                repo=repo, server_log_path=self._server_log_path, username=username
             )
 
         try:
             self._wait_for_health()
-            self._session_id = self._create_session(title=session_title or f"runner:{repo.name}")
+            self._session_id = self._create_session(title=self._session_title)
         except Exception:
             # If init fails after starting a local server, ensure we don't leak the process.
             try:
@@ -228,41 +292,50 @@ class OpenCodeClient(AgentClient):
         - 内容：尝试调用 `/instance/dispose`；若是本地启动的 server，则 terminate/kill 进程并关闭日志文件句柄。
         - 可简略：否（避免后台进程泄漏）。
         """
-        try:
-            # Best-effort dispose (does not necessarily terminate the server process).
-            if self._proc is not None:
+        self._stop_local_server()
+        if self._server_log_file is not None:
+            try:
+                self._server_log_file.close()
+            except Exception:
+                pass
+            self._server_log_file = None
+
+    def _stop_local_server(self) -> None:
+        """Best-effort stop for locally-owned OpenCode server process."""
+        if self._proc is not None:
+            try:
+                # Do not block shutdown on a potentially wedged server.
+                self._request_json("POST", "/instance/dispose", body=None, require_auth=True, timeout_seconds=5)
+            except Exception:
+                pass
+            try:
+                if os.name == "posix":
+                    try:
+                        os.killpg(os.getpgid(self._proc.pid), signal.SIGTERM)
+                    except Exception:
+                        self._proc.terminate()
+                else:  # pragma: no cover
+                    self._proc.terminate()
                 try:
-                    # Do not block shutdown on a potentially wedged server.
-                    self._request_json("POST", "/instance/dispose", body=None, require_auth=True, timeout_seconds=5)
+                    self._proc.wait(timeout=5)
                 except Exception:
-                    pass
-        finally:
-            if self._proc is not None:
-                try:
                     if os.name == "posix":
                         try:
-                            os.killpg(os.getpgid(self._proc.pid), signal.SIGTERM)
+                            os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
                         except Exception:
-                            self._proc.terminate()
-                    else:  # pragma: no cover
-                        self._proc.terminate()
-                    try:
-                        self._proc.wait(timeout=5)
-                    except Exception:
-                        if os.name == "posix":
-                            try:
-                                os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
-                            except Exception:
-                                self._proc.kill()
-                        else:  # pragma: no cover
                             self._proc.kill()
-                except Exception:
-                    pass
-            if self._server_log_file is not None:
-                try:
-                    self._server_log_file.close()
-                except Exception:
-                    pass
+                    else:  # pragma: no cover
+                        self._proc.kill()
+            except Exception:
+                pass
+            finally:
+                self._proc = None
+        if self._server_log_file is not None:
+            try:
+                self._server_log_file.close()
+            except Exception:
+                pass
+            self._server_log_file = None
 
     def run(self, text: str, *, fsm_state: str, iter_idx: int, purpose: str) -> AgentResult:
         """中文说明：
@@ -284,14 +357,15 @@ class OpenCodeClient(AgentClient):
         )
 
         prompt = text
+        trace: list[dict[str, Any]] = []
         last_msg: Any | None = None
-        for _turn in range(20):
+        for turn_idx in range(20):
             try:
-                msg = self._post_message(model=self._model_obj, text=prompt)
+                msg = self._post_message_with_retry(model=self._model_obj, text=prompt)
             except OpenCodeRequestError as e:
                 # Compatibility fallback: some builds may accept model as a string.
                 if e.status in (400, 422):
-                    msg = self._post_message(model=self._model_str, text=prompt)
+                    msg = self._post_message_with_retry(model=self._model_str, text=prompt)
                 else:
                     raise
             last_msg = msg
@@ -303,14 +377,70 @@ class OpenCodeClient(AgentClient):
             assistant_text = _extract_assistant_text(msg)
             calls = parse_tool_calls(assistant_text)
             if not calls:
-                return AgentResult(assistant_text=assistant_text, raw=msg)
+                trace.append(
+                    {
+                        "turn": int(turn_idx + 1),
+                        "assistant_text_tail": tail(assistant_text or "", 4000),
+                        "calls": [],
+                        "results": [],
+                    }
+                )
+                return AgentResult(assistant_text=assistant_text, raw=msg, tool_trace=trace)
 
             results = execute_tool_calls(calls, repo=self._repo, policy=policy)
+            compact_results: list[dict[str, Any]] = []
+            for r in results:
+                detail = dict(r.detail or {})
+                if isinstance(detail.get("content"), str):
+                    detail["content"] = tail(detail["content"], 4000)
+                if isinstance(detail.get("stdout"), str):
+                    detail["stdout"] = tail(detail["stdout"], 4000)
+                if isinstance(detail.get("stderr"), str):
+                    detail["stderr"] = tail(detail["stderr"], 4000)
+                compact_results.append(detail | {"tool": r.kind, "ok": bool(r.ok)})
+            trace.append(
+                {
+                    "turn": int(turn_idx + 1),
+                    "assistant_text_tail": tail(assistant_text or "", 4000),
+                    "calls": [
+                        {
+                            "kind": str(c.kind),
+                            "payload": c.payload if isinstance(c.payload, (dict, list, str, int, float, bool)) else str(c.payload),
+                        }
+                        for c in calls
+                    ],
+                    "results": compact_results,
+                }
+            )
+
+            # For scaffold runs, we don't need the agent to "finish talking" if the contract
+            # is already valid. Some models keep emitting extra tool calls indefinitely.
+            if str(purpose or "").strip().lower() == "scaffold_contract" and self._pipeline_rel:
+                try:
+                    from .pipeline_spec import load_pipeline_spec  # local import to avoid overhead for non-scaffold runs
+                    from .scaffold_validation import validate_scaffold_contract
+
+                    pipeline_path = (self._repo / self._pipeline_rel).resolve()
+                    if pipeline_path.exists():
+                        parsed = load_pipeline_spec(pipeline_path)
+                        report = validate_scaffold_contract(self._repo, pipeline=parsed, require_metrics=True)
+                        if report.ok:
+                            return AgentResult(assistant_text=assistant_text, raw=msg, tool_trace=trace)
+                except Exception:
+                    pass
+
             prompt = format_tool_results(results)
 
         raise RuntimeError("OpenCode tool loop exceeded 20 turns without a final response.")
 
-    def _start_local_server(self, *, repo: Path, server_log_path: Path | None, username: str | None) -> OpenCodeServerConfig:
+    def _start_local_server(
+        self,
+        *,
+        repo: Path,
+        server_log_path: Path | None,
+        username: str | None,
+        append_log: bool = False,
+    ) -> OpenCodeServerConfig:
         """中文说明：
         - 含义：在本地启动 OpenCode server（`opencode serve`）。
         - 内容：选择一个空闲端口；生成随机 password；设置 OPENCODE_SERVER_* 环境变量；可选写 server log 到 artifacts。
@@ -341,7 +471,15 @@ class OpenCodeClient(AgentClient):
         stdout = subprocess.DEVNULL
         if server_log_path is not None:
             server_log_path.parent.mkdir(parents=True, exist_ok=True)
-            self._server_log_file = server_log_path.open("w", encoding="utf-8")
+            if self._server_log_file is not None:
+                try:
+                    self._server_log_file.close()
+                except Exception:
+                    pass
+            self._server_log_file = server_log_path.open(
+                "a" if append_log else "w",
+                encoding="utf-8",
+            )
             stdout = self._server_log_file
 
         self._proc = subprocess.Popen(
@@ -387,23 +525,158 @@ class OpenCodeClient(AgentClient):
             return data["sessionID"]
         raise RuntimeError(f"unexpected /session response: {tail(json.dumps(data, ensure_ascii=False), 2000)}")
 
-    def _post_message(self, *, model: Any, text: str) -> Any:
+    def _sleep_retry_backoff(self, *, attempt_idx: int) -> None:
+        """中文说明：
+        - 含义：按指数退避等待下一次 OpenCode 请求重试。
+        - 内容：delay = base * 2^(attempt_idx-1)，并限制到 30 秒，避免无上限等待。
+        - 可简略：可能（简单策略函数；但集中处理更便于调参与测试）。
+        """
+        base = float(self._request_retry_backoff_seconds or 0.0)
+        if base <= 0:
+            return
+        delay = min(30.0, base * (2 ** max(0, int(attempt_idx) - 1)))
+        if delay > 0:
+            time.sleep(delay)
+
+    def _sleep_session_recover_backoff(self, *, recover_idx: int) -> None:
+        base = float(self._session_recover_backoff_seconds or 0.0)
+        if base <= 0:
+            return
+        delay = min(30.0, base * (2 ** max(0, int(recover_idx) - 1)))
+        if delay > 0:
+            time.sleep(delay)
+
+    def _is_transport_unavailable_error(self, err: OpenCodeRequestError) -> bool:
+        if err.status is not None:
+            return False
+        return _looks_like_transport_unavailable(err.detail)
+
+    def _recover_local_server_session(self, *, reason: str) -> None:
+        """Restart local OpenCode server and create a fresh session."""
+        if not self._owns_local_server:
+            raise RuntimeError("session_recover_not_local_server")
+        username = (
+            str(getattr(self, "_server", None).username).strip()
+            if getattr(self, "_server", None) is not None
+            else "opencode"
+        ) or "opencode"
+        self._stop_local_server()
+        self._server = self._start_local_server(
+            repo=self._repo,
+            server_log_path=self._server_log_path,
+            username=username,
+            append_log=True,
+        )
+        self._wait_for_health()
+        self._session_id = self._create_session(title=self._session_title)
+
+    def _should_retry_request_error(self, err: OpenCodeRequestError) -> bool:
+        """中文说明：
+        - 含义：判断 OpenCode 请求错误是否属于可重试类别。
+        - 内容：网络类（status=None）以及常见瞬时 HTTP 错误（408/409/425/429/5xx）会重试。
+        - 可简略：可能（也可在调用点内联；集中定义更可维护）。
+        """
+        if err.status is None:
+            return True
+        try:
+            code = int(err.status)
+        except Exception:
+            return True
+        if code in (408, 409, 425, 429):
+            return True
+        return code >= 500
+
+    def _clip_prompt_text(self, text: str) -> str:
+        """中文说明：
+        - 含义：按配置裁剪超长 prompt（保留头尾），避免超过服务端可接受上下文。
+        - 内容：未设置 `max_prompt_chars` 时不裁剪；裁剪时插入标记便于定位。
+        - 可简略：可能（可直接尾裁剪；但头尾保留更稳妥）。
+        """
+        s = str(text or "")
+        cap = self._max_prompt_chars
+        if cap is None or cap <= 0 or len(s) <= cap:
+            return s
+        if cap < 128:
+            return s[-cap:]
+        marker = "\n...[TRUNCATED_FOR_OPENCODE_CONTEXT]...\n"
+        head = max(32, cap // 2)
+        tail_keep = max(32, cap - head - len(marker))
+        return s[:head] + marker + s[-tail_keep:]
+
+    def _post_message_with_retry(self, *, model: Any, text: str) -> Any:
+        """中文说明：
+        - 含义：发送 message 请求并在超时/瞬时错误时自动重试。
+        - 内容：支持 `request_retry_attempts` + 指数退避；若 `contextLength` 字段不被服务端接受，会自动降级重发一次。
+        - 可简略：否（是提升 scaffold/repair 稳定性的关键逻辑）。
+        """
+        attempts = 1 + int(self._request_retry_attempts or 0)
+        include_context = True
+        last_err: OpenCodeRequestError | None = None
+        recover_budget = int(self._session_recover_attempts or 0) if self._owns_local_server else 0
+        recover_tries = 0
+
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._post_message(model=model, text=text, include_context=include_context)
+            except OpenCodeRequestError as e:
+                last_err = e
+                # Some OpenCode builds may reject unknown fields; degrade gracefully.
+                if include_context and self._context_length is not None and e.status in (400, 422):
+                    include_context = False
+                    try:
+                        return self._post_message(model=model, text=text, include_context=False)
+                    except OpenCodeRequestError as e2:
+                        last_err = e2
+                        e = e2
+                if self._is_transport_unavailable_error(e) and recover_tries < recover_budget:
+                    recover_tries += 1
+                    try:
+                        self._recover_local_server_session(reason=e.detail)
+                    except Exception as recover_exc:
+                        last_err = OpenCodeRequestError(
+                            method=e.method,
+                            url=e.url,
+                            status=e.status,
+                            detail=f"{e.detail}; recover_failed: {tail(str(recover_exc), 1200)}",
+                        )
+                    else:
+                        self._sleep_session_recover_backoff(recover_idx=recover_tries)
+                        continue
+                if attempt >= attempts or not self._should_retry_request_error(e):
+                    raise
+                self._sleep_retry_backoff(attempt_idx=attempt)
+
+        if last_err is not None:
+            raise last_err
+        raise RuntimeError("opencode_retry_failed_without_error")
+
+    def _post_message(self, *, model: Any, text: str, include_context: bool = True) -> Any:
         """中文说明：
         - 含义：向当前 session 发送一条消息（prompt），返回 server 的 message JSON。
         - 内容：body 里包含 agent 类型、model、parts；由 `_request_json` 完成 HTTP 细节与错误包装。
         - 可简略：可能（薄封装；但把请求体结构集中在一处更易维护）。
         """
+        clipped_text = self._clip_prompt_text(text)
         body = {
             "agent": "build",
             "model": model,
-            "parts": [{"type": "text", "text": text}],
+            "parts": [{"type": "text", "text": clipped_text}],
         }
-        return self._request_json(
+        if include_context and self._context_length is not None:
+            # Best-effort: different OpenCode versions may ignore this field.
+            body["contextLength"] = int(self._context_length)
+        data = self._request_json(
             "POST",
             f"/session/{self._session_id}/message",
             body=body,
             require_auth=bool(self._server.password),
         )
+        # Some OpenCode builds/transports may respond with 200 + empty body; treat it as a transient transport failure
+        # so the caller can retry or recover the local session instead of silently returning "None".
+        if data is None:
+            url = f"{self._server.base_url}/session/{self._session_id}/message"
+            raise OpenCodeRequestError(method="POST", url=url, status=None, detail="connection closed: empty_response_body")
+        return data
 
     def _request_json(self, method: str, path: str, *, body: Any, require_auth: bool, timeout_seconds: float | None = None) -> Any:
         """中文说明：
@@ -438,3 +711,7 @@ class OpenCodeClient(AgentClient):
             raise OpenCodeRequestError(method=method, url=url, status=int(getattr(e, "code", 0) or 0), detail=tail(detail, 2000))
         except URLError as e:
             raise OpenCodeRequestError(method=method, url=url, status=None, detail=str(e))
+        except (TimeoutError, socket.timeout) as e:
+            raise OpenCodeRequestError(method=method, url=url, status=None, detail=f"timeout: {e}")
+        except OSError as e:
+            raise OpenCodeRequestError(method=method, url=url, status=None, detail=f"os_error: {e}")
