@@ -37,6 +37,32 @@ def test_normalize_hint_command_strips_common_shell_prompts() -> None:
     assert cmd == "python3 -m foo.bar --x 1"
 
 
+def test_normalize_hint_command_strips_pytest_xdist_flags_by_default() -> None:
+    # 作用：pytest 测试用例：验证行为契约
+    # 能否简略：否
+    # 原因：防止缺少 pytest-xdist 时 `pytest -n ...` 直接 usage error，导致严格评估卡死在 hints
+    # 证据：位置=tests/test_hints_exec.py；类型=function；引用≈1；规模≈10行
+    cmd, reason = normalize_hint_command("pytest -n 5 --dist loadscope -q", env={})
+    assert reason is None
+    assert " -n " not in f" {cmd} "
+    assert " --dist " not in f" {cmd} "
+    assert cmd.startswith("pytest ")
+
+
+def test_normalize_hint_command_strips_pytest_xdist_flags_under_uv_run() -> None:
+    # 作用：pytest 测试用例：验证行为契约
+    # 能否简略：否
+    # 原因：BrowserGym 类 repo 常用 `uv run pytest -n ...`，需要同样做兼容性去旗标处理
+    # 证据：位置=tests/test_hints_exec.py；类型=function；引用≈1；规模≈12行
+    cmd, reason = normalize_hint_command(
+        "uv run pytest -n 5 --durations=10 -m 'not pricy' -v tests/core",
+        env={},
+    )
+    assert reason is None
+    assert " -n " not in f" {cmd} "
+    assert cmd.startswith("uv run pytest ")
+
+
 def test_normalize_hint_command_absolutizes_repo_relative_aider_fsm_python(tmp_path: Path) -> None:
     # 作用：pytest 测试用例：验证行为契约
     # 能否简略：否

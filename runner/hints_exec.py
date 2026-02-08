@@ -638,6 +638,52 @@ def normalize_hint_command(cmd: str, *, env: dict[str, str]) -> tuple[str, str |
 
     s2 = "\n".join([_maybe_bound_openai_codegen_eval(_maybe_normalize_fire_flag_aliases(line)) for line in s2.splitlines()])
 
+    # Some repos recommend `pytest -n ...` (xdist), but the plugin is often missing in
+    # minimal environments. Strip xdist-only flags by default to improve compatibility.
+    strip_pytest_n = _is_truthy(env.get("AIDER_FSM_HINT_STRIP_PYTEST_N", "1"))
+    if strip_pytest_n:
+        def _strip_pytest_xdist_flags(line: str) -> str:
+            # 作用：内部符号：normalize_hint_command._strip_pytest_xdist_flags
+            # 能否简略：是
+            # 原因：小型兼容性改写；避免 xdist 缺失导致 `pytest -n` 直接报错（runner 更通用）
+            # 证据：位置=runner/hints_exec.py；类型=function；引用≈1；规模≈40行
+            try:
+                parts = shlex.split(line, posix=True)
+            except Exception:
+                return line
+            if not parts:
+                return line
+            if "pytest" not in parts:
+                return line
+            out: list[str] = []
+            i = 0
+            while i < len(parts):
+                tok = str(parts[i] or "")
+                if tok == "-n":
+                    # Drop `-n <N|auto>`; keep the next token if it looks like another flag.
+                    if i + 1 < len(parts) and not str(parts[i + 1] or "").startswith("-"):
+                        i += 2
+                    else:
+                        i += 1
+                    continue
+                if tok.startswith("-n="):
+                    i += 1
+                    continue
+                if tok == "--dist":
+                    if i + 1 < len(parts) and not str(parts[i + 1] or "").startswith("-"):
+                        i += 2
+                    else:
+                        i += 1
+                    continue
+                if tok.startswith("--dist="):
+                    i += 1
+                    continue
+                out.append(tok)
+                i += 1
+            return " ".join(shlex.quote(x) for x in out)
+
+        s2 = "\n".join([_strip_pytest_xdist_flags(line) for line in s2.splitlines()])
+
     # If the command still contains bracket placeholders, it's likely not directly runnable.
     tmp = re.sub(r"\[\s*\d+\s*,\s*\d+\s*\]", "", s2)
     if "[" in tmp and "]" in tmp:
@@ -926,6 +972,7 @@ def run_hints(
     login_shell = _is_truthy(env2.get("AIDER_FSM_HINT_LOGIN_SHELL"))
     strict_compat = _is_truthy(env2.get("AIDER_FSM_HINT_STRICT_COMPAT", "1"))
     require_real_score = _is_truthy(env2.get("AIDER_FSM_REQUIRE_REAL_SCORE"))
+    auto_uv_py311 = _is_truthy(env2.get("AIDER_FSM_HINT_AUTO_UV_PY311", "1"))
     artifacts_dir_s = str(env2.get("AIDER_FSM_ARTIFACTS_DIR") or "").strip()
     artifacts_dir: Path | None = None
     if artifacts_dir_s:
@@ -934,6 +981,88 @@ def run_hints(
             artifacts_dir = p.resolve() if p.is_absolute() else (repo / p).resolve()
         except Exception:
             artifacts_dir = None
+
+    uv_py_req = str(env2.get("AIDER_FSM_HINT_UV_PYTHON") or env2.get("UV_PYTHON") or "").strip()
+    if not uv_py_req and sys.version_info >= (3, 13):
+        # Python 3.13 is still unsupported by some popular C-extension deps (e.g. greenlet).
+        # Prefer a stable default when the runner itself is executed under 3.13+.
+        uv_py_req = "3.11"
+
+    uv_py311_env: dict[str, str] | None = None
+
+    def _looks_like_py_incompat_build_failure(text: str) -> bool:
+        # 作用：内部符号：run_hints._looks_like_py_incompat_build_failure
+        # 能否简略：部分
+        # 原因：启发式判断编译/轮子构建失败（常见于 Py3.13 C 扩展）；用于触发一次性回退重试
+        # 证据：位置=runner/hints_exec.py；类型=function；引用≈1；规模≈15行
+        low = str(text or "").lower()
+        if not low:
+            return False
+        if "greenlet" in low and ("cframe" in low or "_pycframe" in low or "failed to build" in low):
+            return True
+        if "failed building wheel for" in low or "could not build wheels for" in low:
+            return True
+        if "subprocess-exited-with-error" in low and ("error:" in low or "failed" in low):
+            return True
+        if "failed to build installable wheels" in low and ("pyproject.toml" in low or "greenlet" in low):
+            return True
+        return False
+
+    def _ensure_uv_py311_env() -> tuple[dict[str, str] | None, str]:
+        # 作用：内部符号：run_hints._ensure_uv_py311_env
+        # 能否简略：否
+        # 原因：把“失败后切 uv+py311 venv 重试”的策略封装到一个点，避免散落在执行循环里
+        # 证据：位置=runner/hints_exec.py；类型=function；引用≈1；规模≈60行
+        nonlocal uv_py311_env
+        if uv_py311_env is not None:
+            return uv_py311_env, "ok"
+        if not auto_uv_py311:
+            return None, "disabled"
+        if shutil.which("uv") is None:
+            return None, "uv_not_found"
+        py_req = uv_py_req or "3.11"
+        try:
+            m = re.match(r"^\s*(\d+)\.(\d+)\s*$", py_req)
+            tag = f"py{m.group(1)}{m.group(2)}" if m else "py"
+        except Exception:
+            tag = "py"
+        raw_venv_dir = str(env2.get("AIDER_FSM_HINT_UV_VENV_DIR") or "").strip()
+        if raw_venv_dir:
+            venv_dir = Path(raw_venv_dir).expanduser()
+            if not venv_dir.is_absolute():
+                venv_dir = (repo / venv_dir).resolve()
+        else:
+            venv_dir = (repo / ".aider_fsm" / f"venv_hints_{tag}").resolve()
+        py_bin = (venv_dir / "bin" / "python").absolute()
+        try:
+            venv_dir.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            res = subprocess.run(
+                ["uv", "venv", "--allow-existing", "--seed", "pip", "--python", py_req, str(venv_dir)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=600,
+                cwd=str(repo),
+                env=env2,
+            )
+        except Exception as e:
+            return None, f"uv_venv_failed:{e}"
+        if int(getattr(res, "returncode", 1) or 1) != 0:
+            tail = _tail(str(getattr(res, "stderr", "") or "") + "\n" + str(getattr(res, "stdout", "") or ""), 4000)
+            return None, f"uv_venv_failed_rc={getattr(res, 'returncode', None)}:{tail}"
+        envx = dict(env2)
+        old_path = str(envx.get("PATH") or "")
+        envx["PATH"] = str((venv_dir / "bin").absolute()) + (os.pathsep + old_path if old_path else "")
+        envx["VIRTUAL_ENV"] = str(venv_dir.absolute())
+        envx["AIDER_FSM_PYTHON"] = str(py_bin)
+        envx["PYTHON"] = str(py_bin)
+        if uv_py_req:
+            envx.setdefault("UV_PYTHON", uv_py_req)
+        uv_py311_env = envx
+        return uv_py311_env, "ok"
 
     def _priority(raw: str) -> int:
         # 作用：内部符号：run_hints._priority
@@ -1414,44 +1543,72 @@ if len(seen) <= 0:
 
         t0 = time.monotonic()
         timed_out = False
-        try:
-            # IMPORTANT: prefer a non-login shell by default so bootstrap PATH overrides
-            # (e.g. `.aider_fsm/venv/bin:$PATH`) are preserved. Login shells frequently
-            # reset PATH via /etc/profile and can accidentally select global tools.
-            env3 = env2
-            if workdir != repo:
-                # When running from an artifacts workdir, keep the repo root importable
-                # for `python -m pkg.mod` style hints that rely on local modules.
-                env3 = dict(env2)
-                repo_s = str(repo)
-                pp = str(env3.get("PYTHONPATH") or "")
-                parts = [p for p in pp.split(os.pathsep) if p]
-                if repo_s not in parts:
-                    env3["PYTHONPATH"] = pp + (os.pathsep if pp else "") + repo_s
-            if workdir != repo and _looks_like_openai_codegen_eval(sanitized):
-                env3 = _maybe_prepare_dataset_override(sanitized, workdir=workdir, env=env3)
-            bash_args = ["bash", "-lc", sanitized] if login_shell else ["bash", "-c", sanitized]
-            res = subprocess.run(
-                bash_args,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=float(timeout_seconds),
-                cwd=str(workdir),
-                env=env3,
-            )
-            rc = int(res.returncode)
-            out = res.stdout or ""
-            err = res.stderr or ""
-        except subprocess.TimeoutExpired as e:
-            timed_out = True
-            rc = 124
-            out = getattr(e, "stdout", "") or ""
-            err = getattr(e, "stderr", "") or ""
-            if isinstance(out, bytes):
-                out = out.decode("utf-8", errors="replace")
-            if isinstance(err, bytes):
-                err = err.decode("utf-8", errors="replace")
+        def _exec(cmd: str, *, env: dict[str, str]) -> tuple[int, str, str, bool]:
+            # 作用：内部符号：run_hints._exec
+            # 能否简略：否
+            # 原因：集中处理超时/解码/返回码，保证每次 hint 执行的行为一致且可审计
+            # 证据：位置=runner/hints_exec.py；类型=function；引用≈2；规模≈25行
+            nonlocal timed_out
+            try:
+                bash_args = ["bash", "-lc", cmd] if login_shell else ["bash", "-c", cmd]
+                res = subprocess.run(
+                    bash_args,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=float(timeout_seconds),
+                    cwd=str(workdir),
+                    env=env,
+                )
+                return int(res.returncode), (res.stdout or ""), (res.stderr or ""), False
+            except subprocess.TimeoutExpired as e:
+                timed_out = True
+                out = getattr(e, "stdout", "") or ""
+                err = getattr(e, "stderr", "") or ""
+                if isinstance(out, bytes):
+                    out = out.decode("utf-8", errors="replace")
+                if isinstance(err, bytes):
+                    err = err.decode("utf-8", errors="replace")
+                return 124, str(out), str(err), True
+
+        # IMPORTANT: prefer a non-login shell by default so bootstrap PATH overrides
+        # (e.g. `.aider_fsm/venv/bin:$PATH`) are preserved. Login shells frequently
+        # reset PATH via /etc/profile and can accidentally select global tools.
+        env3: dict[str, str] = env2
+        if uv_py_req:
+            env3 = dict(env3)
+            env3.setdefault("UV_PYTHON", uv_py_req)
+        if workdir != repo:
+            # When running from an artifacts workdir, keep the repo root importable
+            # for `python -m pkg.mod` style hints that rely on local modules.
+            if env3 is env2:
+                env3 = dict(env3)
+            repo_s = str(repo)
+            pp = str(env3.get("PYTHONPATH") or "")
+            parts = [p for p in pp.split(os.pathsep) if p]
+            if repo_s not in parts:
+                env3["PYTHONPATH"] = pp + (os.pathsep if pp else "") + repo_s
+        if workdir != repo and _looks_like_openai_codegen_eval(sanitized):
+            env3 = _maybe_prepare_dataset_override(sanitized, workdir=workdir, env=env3)
+
+        rc, out, err, this_timed_out = _exec(sanitized, env=env3)
+
+        # If we see a Python/C-extension build failure (common on Py3.13), retry once
+        # inside a uv-managed Py3.11 venv.
+        if (
+            rc != 0
+            and not this_timed_out
+            and auto_uv_py311
+            and sys.version_info >= (3, 13)
+            and _looks_like_py_incompat_build_failure((_tail(out, 20000) + "\n" + _tail(err, 20000)))
+        ):
+            env_py311, prep_reason = _ensure_uv_py311_env()
+            if env_py311 is not None:
+                rc2, out2, err2, _ = _exec(sanitized, env=env_py311)
+                # Keep the retry result, but also surface that a retry happened.
+                out = out2
+                err = f"(retry_uv_py311: {prep_reason})\n{err2}"
+                rc = rc2
 
         executed += 1
         dt = time.monotonic() - t0

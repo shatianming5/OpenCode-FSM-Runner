@@ -767,26 +767,25 @@ def run_pipeline_verification(
                         evaluation=eval_res,
                         metrics_errors=metrics_errors,
                     )
-                if _is_truthy(eval_env.get("AIDER_FSM_REQUIRE_REAL_SCORE")):
-                    ok_run, run_reason = _validate_hints_run(repo)
-                    if not ok_run:
-                        try:
-                            write_text(artifacts_dir / "hints_run_requirement_error.txt", run_reason + "\n")
-                        except Exception:
-                            pass
-                        metrics_errors.append(f"evaluation.hints_run_requirement_failed: {run_reason}")
-                        failed_stage = "evaluation"
-                        return VerificationResult(
-                            ok=False,
-                            failed_stage=failed_stage,
-                            auth=auth_res,
-                            tests=tests_res,
-                            deploy_setup=deploy_setup_res,
-                            deploy_health=deploy_health_res,
-                            rollout=rollout_res,
-                            evaluation=eval_res,
-                            metrics_errors=metrics_errors,
-                        )
+                ok_run, run_reason = _validate_hints_run(repo)
+                if not ok_run:
+                    try:
+                        write_text(artifacts_dir / "hints_run_requirement_error.txt", run_reason + "\n")
+                    except Exception:
+                        pass
+                    metrics_errors.append(f"evaluation.hints_run_requirement_failed: {run_reason}")
+                    failed_stage = "evaluation"
+                    return VerificationResult(
+                        ok=False,
+                        failed_stage=failed_stage,
+                        auth=auth_res,
+                        tests=tests_res,
+                        deploy_setup=deploy_setup_res,
+                        deploy_health=deploy_health_res,
+                        rollout=rollout_res,
+                        evaluation=eval_res,
+                        metrics_errors=metrics_errors,
+                    )
 
         if pipeline and pipeline.evaluation_metrics_path:
             mpath = Path(pipeline.evaluation_metrics_path).expanduser()

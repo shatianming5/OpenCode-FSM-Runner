@@ -317,7 +317,7 @@ def test_run_pipeline_verification_require_hints_used_missing_fails(tmp_path: Pa
 
 
 def test_run_pipeline_verification_require_hints_used_ok_passes(tmp_path: Path):
-    """When hint execution is required, a valid hints_used.json should allow verification to pass."""
+    """When hint execution is required, hints_used.json + hints_run.json must validate."""
     # 作用：When hint execution is required, a valid hints_used.json should allow verification to pass.
     # 能否简略：否
     # 原因：测试代码（优先可读性）；规模≈28 行；引用次数≈1（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
@@ -327,6 +327,9 @@ def test_run_pipeline_verification_require_hints_used_ok_passes(tmp_path: Path):
         "pathlib.Path('.aider_fsm').mkdir(parents=True, exist_ok=True); "
         "pathlib.Path('.aider_fsm/hints_used.json').write_text(json.dumps({"
         "'ok': True, 'used_anchors': ['pytest'], 'commands': ['pytest -q']"
+        "}) + '\\n'); "
+        "pathlib.Path('.aider_fsm/hints_run.json').write_text(json.dumps({"
+        "'ok': True, 'score': 1.0, 'chosen_command': 'pytest -q', 'executed_attempts': 1"
         "}) + '\\n'); "
         "pathlib.Path('metrics.json').write_text(json.dumps({'ok': True, 'score': 1}) + '\\n')"
     )
