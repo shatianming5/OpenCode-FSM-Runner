@@ -1033,7 +1033,9 @@ def run_hints(
         if str(env.get(override_var) or "").strip():
             return env
 
-        # Identify the evaluator package from `python -m pkg.mod ...`.
+        # Identify the evaluator package from either:
+        # - `python -m pkg.mod ...` (module execution)
+        # - `pkg.mod ...` / `/path/to/pkg.mod ...` (console-script style)
         line = _first_command_line(cmd)
         if not line:
             return env
@@ -1041,12 +1043,25 @@ def run_hints(
             parts = shlex.split(line, posix=True)
         except Exception:
             return env
-        if "-m" not in parts:
-            return env
-        try:
-            module = str(parts[parts.index("-m") + 1] or "").strip()
-        except Exception:
-            module = ""
+        module = ""
+        if "-m" in parts:
+            try:
+                module = str(parts[parts.index("-m") + 1] or "").strip()
+            except Exception:
+                module = ""
+        if not module:
+            # Skip leading env assignments, e.g. `FOO=1 cmd ...`.
+            i = 0
+            while i < len(parts) and _ENV_ASSIGN_RE.match(str(parts[i] or "").strip()):
+                i += 1
+            if i < len(parts):
+                first = str(parts[i] or "").strip()
+                # Allow either `pkg.mod` or `/abs/path/pkg.mod`.
+                cand = os.path.basename(first)
+                if _DOTTED_MODULE_RE.fullmatch(cand):
+                    module = cand
+                elif _DOTTED_MODULE_RE.fullmatch(first):
+                    module = first
         if not module or "." not in module:
             return env
         pkg = module.split(".", 1)[0].strip()
