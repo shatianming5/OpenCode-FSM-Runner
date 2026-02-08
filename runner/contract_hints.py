@@ -21,6 +21,83 @@ class ContractHints:
 
 _FENCE_RE = re.compile(r"```[a-zA-Z0-9_-]*\n(?P<body>.*?)\n```", re.DOTALL)
 
+_PROMPT_PREFIX_RE = re.compile(r"^(?P<prefix>(?:\$|>>>|\.\.\.)\s+)")
+
+
+def _strip_prompt_prefix(line: str) -> str:
+    """Strip common REPL / shell prompt prefixes in docs (best-effort)."""
+    # 作用：Strip common REPL / shell prompt prefixes in docs (best-effort).
+    # 能否简略：是
+    # 原因：规模≈8 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
+    # 证据：位置=runner/contract_hints.py:20；类型=function；引用≈2；规模≈8行
+    s = str(line or "").strip()
+    if not s:
+        return ""
+    if s.startswith("> "):
+        # Markdown quote prefix occasionally appears inside fenced blocks.
+        s = s[2:].lstrip()
+    m = _PROMPT_PREFIX_RE.match(s)
+    if m:
+        s = s[m.end("prefix") :].lstrip()
+    return s
+
+
+_COMMANDISH_FIRST = {
+    "bash",
+    "sh",
+    "zsh",
+    "python",
+    "python3",
+    "pip",
+    "pip3",
+    "uv",
+    "poetry",
+    "conda",
+    "make",
+    "pytest",
+    "docker",
+    "git",
+    # Shell builtins are still useful anchors (e.g., `cd repo`).
+    "cd",
+    "export",
+    "env",
+    "source",
+}
+
+
+def _looks_like_command(line: str) -> bool:
+    """Heuristic filter to avoid treating prose as runnable hints."""
+    # 作用：Heuristic filter to avoid treating prose as runnable hints.
+    # 能否简略：部分
+    # 原因：规模≈28 行；引用次数≈2（静态近似，可能包含注释/字符串）；可通过拆分/去重复/抽 helper 减少复杂度，但不建议完全内联
+    # 证据：位置=runner/contract_hints.py:48；类型=function；引用≈2；规模≈28行
+    s = _strip_prompt_prefix(line)
+    if not s:
+        return False
+    try:
+        parts = shlex.split(s, posix=True)
+    except Exception:
+        parts = [t for t in re.split(r"\s+", s) if t]
+    if not parts:
+        return False
+    first = str(parts[0] or "").strip()
+    if not first:
+        return False
+    if first.startswith(("@", "*", "[", "(", "{")):
+        return False
+    # Reject key/value style lines from BibTeX/YAML/etc (e.g. `title = {...}`).
+    if re.match(r"^[A-Za-z][A-Za-z0-9_]{2,}\\s*=\\s*", s):
+        return False
+    if first.startswith((".", "/")) or "/" in first or first.endswith((".py", ".sh")):
+        return True
+    if first in _COMMANDISH_FIRST:
+        return True
+    # Accept lower-case CLI entrypoints that look like actual binaries/modules
+    # (punctuation helps distinguish from prose like `and`, `completed`, etc).
+    if re.fullmatch(r"[a-z][a-z0-9_.-]{2,}", first) and any(ch in first for ch in "._-"):
+        return True
+    return False
+
 
 def _iter_md_paths(repo: Path, *, max_files: int) -> list[Path]:
     # 作用：内部符号：_iter_md_paths
@@ -205,11 +282,12 @@ def _tokenize_hint(cmd: str) -> list[str]:
     # 能否简略：是
     # 原因：规模≈6 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
     # 证据：位置=runner/contract_hints.py:172；类型=function；引用≈2；规模≈6行
+    cmd2 = _strip_prompt_prefix(cmd)
     try:
-        return shlex.split(cmd)
+        return shlex.split(cmd2)
     except Exception:
         # Fallback tokenization; good enough for anchors.
-        return [t for t in re.split(r"\s+", str(cmd or "").strip()) if t]
+        return [t for t in re.split(r"\s+", str(cmd2 or "").strip()) if t]
 
 
 def _extract_anchors(hints: list[str]) -> list[str]:
@@ -222,6 +300,7 @@ def _extract_anchors(hints: list[str]) -> list[str]:
     # 原因：规模≈96 行；引用次数≈4（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
     # 证据：位置=runner/contract_hints.py:184；类型=function；引用≈4；规模≈96行
     skip_first = {
+        "cd",
         "bash",
         "sh",
         "zsh",
@@ -238,6 +317,7 @@ def _extract_anchors(hints: list[str]) -> list[str]:
         "npm",
         "node",
         "docker",
+        "git",
         "sudo",
     }
     skip_tokens = {
@@ -352,7 +432,7 @@ def suggest_contract_hints(repo: Path, *, max_files: int = 8, max_candidates: in
             block_cmds: list[str] = []
             cur = ""
             for raw in body.splitlines():
-                line = raw.strip()
+                line = _strip_prompt_prefix(raw)
                 if not line or line.startswith("#"):
                     continue
                 low = line.lower()
@@ -375,6 +455,8 @@ def suggest_contract_hints(repo: Path, *, max_files: int = 8, max_candidates: in
                 block_cmds.append(cur)
 
             for cmd in block_cmds:
+                if not _looks_like_command(cmd):
+                    continue
                 if not interest_re.search(cmd):
                     continue
                 if cmd in seen:

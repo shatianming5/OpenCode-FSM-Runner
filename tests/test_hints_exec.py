@@ -27,6 +27,16 @@ def test_normalize_hint_command_keeps_existing_python_module_invocations() -> No
     assert cmd == "python3 -m foo.bar --x 1"
 
 
+def test_normalize_hint_command_strips_common_shell_prompts() -> None:
+    # 作用：pytest 测试用例：验证行为契约
+    # 能否简略：否
+    # 原因：测试代码（优先可读性）；规模≈6 行；引用次数≈1（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
+    # 证据：位置=tests/test_hints_exec.py:23；类型=function；引用≈1；规模≈6行
+    cmd, reason = normalize_hint_command("$ python3 -m foo.bar --x 1", env={"AIDER_FSM_PYTHON": "python3"})
+    assert reason is None
+    assert cmd == "python3 -m foo.bar --x 1"
+
+
 def test_normalize_hint_command_absolutizes_repo_relative_aider_fsm_python(tmp_path: Path) -> None:
     # 作用：pytest 测试用例：验证行为契约
     # 能否简略：否
@@ -346,3 +356,55 @@ def test_run_hints_require_real_score_parses_pass_at_1(tmp_path: Path) -> None:
     res = run_hints(repo=repo, max_attempts=1, timeout_seconds=5, env=env)
     assert res.get("ok") is True
     assert abs(float(res.get("score") or 0.0) - 0.25) < 1e-9
+
+
+def test_run_hints_tries_install_hint_when_pytest_hints_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 作用：pytest 测试用例：验证行为契约
+    # 能否简略：否
+    # 原因：测试代码（优先可读性）；规模≈46 行；引用次数≈1（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
+    # 证据：位置=tests/test_hints_exec.py:??；类型=function；引用≈1；规模≈46行
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+
+    env = {
+        "AIDER_FSM_HINTS_JSON": '["pytest -q tests/a","pytest -q tests/b","pip install foo"]',
+        "AIDER_FSM_HINT_ANCHORS_JSON": '["foo"]',
+    }
+
+    # Treat all hints as runnable for probe phase to focus this test on execution ordering.
+    monkeypatch.setattr("runner.hints_exec._probe_hint_command", lambda **_kwargs: (True, "ok"))
+
+    class _R:
+        # 作用：内部符号：test_run_hints_tries_install_hint_when_pytest_hints_fail._R
+        # 能否简略：否
+        # 原因：测试代码（优先可读性）；规模≈5 行；引用次数≈6（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
+        # 证据：位置=tests/test_hints_exec.py:??；类型=class；引用≈6；规模≈5行
+        def __init__(self, rc: int, out: str = "", err: str = "") -> None:
+            # 作用：内部符号：test_run_hints_tries_install_hint_when_pytest_hints_fail._R.__init__
+            # 能否简略：是
+            # 原因：测试代码（优先可读性）；规模≈4 行；引用次数≈1（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
+            # 证据：位置=tests/test_hints_exec.py:??；类型=method；引用≈1；规模≈4行
+            self.returncode = rc
+            self.stdout = out
+            self.stderr = err
+
+    def fake_run(cmd, *args, **kwargs):  # noqa: ANN001
+        # 作用：内部符号：test_run_hints_tries_install_hint_when_pytest_hints_fail.fake_run
+        # 能否简略：否
+        # 原因：测试代码（优先可读性）；规模≈11 行；引用次数≈12（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
+        # 证据：位置=tests/test_hints_exec.py:??；类型=function；引用≈12；规模≈11行
+        if isinstance(cmd, (list, tuple)) and cmd[:2] == ["bash", "-c"]:
+            s = str(cmd[2])
+            if s.startswith("pytest "):
+                return _R(1, out="", err="failed")
+            if s == "pip install foo":
+                return _R(0, out="ok", err="")
+            raise AssertionError(f"unexpected hint cmd: {s!r}")
+        raise AssertionError(f"unexpected subprocess.run: {cmd!r}")
+
+    monkeypatch.setattr("runner.hints_exec.subprocess.run", fake_run)
+
+    res = run_hints(repo=repo, max_attempts=2, timeout_seconds=5, env=env)
+    assert res.get("ok") is True
+    assert res.get("chosen_command") == "pip install foo"
+    assert res.get("used_anchors") == ["foo"]

@@ -435,6 +435,26 @@ def normalize_hint_command(cmd: str, *, env: dict[str, str]) -> tuple[str, str |
     if not s:
         return "", "empty"
 
+    # Strip common prompt prefixes that appear in docs (best-effort).
+    # Only strip `$` when followed by whitespace to avoid breaking `$HOME/foo` style paths.
+    cleaned: list[str] = []
+    for raw in s.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("> "):
+            line = line[2:].lstrip()
+        if line.startswith("$") and len(line) >= 2 and line[1].isspace():
+            line = line[2:].lstrip()
+        if line.startswith(">>> "):
+            line = line[4:].lstrip()
+        if line.startswith("... "):
+            line = line[4:].lstrip()
+        cleaned.append(line)
+    s = "\n".join(cleaned).strip()
+    if not s:
+        return "", "empty_after_sanitize"
+
     # Replace bracketed option groups like [a|b|c] -> a (first option).
     def bracket_repl(m: re.Match[str]) -> str:
         # 作用：内部符号：normalize_hint_command.bracket_repl
@@ -1304,10 +1324,44 @@ if len(seen) <= 0:
 
     candidates.sort(key=lambda x: (_probe_rank(x.get("probe_ok")), int(x.get("priority") or 0)), reverse=True)
 
+    def _hint_kind(sanitized: str) -> str:
+        # 作用：内部符号：run_hints._hint_kind
+        # 能否简略：是
+        # 原因：规模≈11 行；引用次数≈1（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
+        # 证据：位置=runner/hints_exec.py:1132；类型=function；引用≈1；规模≈11行
+        low = str(sanitized or "").lower()
+        if "pytest" in low:
+            return "pytest"
+        if "pip install" in low or "poetry install" in low or "conda install" in low:
+            return "install"
+        if low.lstrip().startswith("docker "):
+            return "docker"
+        if low.lstrip().startswith("git "):
+            return "git"
+        return "other"
+
+    # Prefer a diverse first-attempt set so we don't burn the whole attempt budget
+    # on a single category (e.g. many pytest hints failing for missing deps) while
+    # skipping simpler setup hints that might succeed (e.g. `pip install pkg`).
+    picked: set[int] = set()
+    ordered: list[dict[str, Any]] = []
+    for want in ("pytest", "install", "docker"):
+        for i, cand in enumerate(candidates):
+            if i in picked:
+                continue
+            if _hint_kind(str(cand.get("sanitized") or "")) == want:
+                ordered.append(cand)
+                picked.add(i)
+                break
+    for i, cand in enumerate(candidates):
+        if i in picked:
+            continue
+        ordered.append(cand)
+
     # Phase 2: execute best candidates only (bounded by max_attempts).
     executed = 0
     openai_auth_failed = False
-    for cand in candidates:
+    for cand in ordered:
         if executed >= int(max(0, max_attempts)):
             break
 
