@@ -179,6 +179,8 @@ class _Target:
     name: str
     kind: str  # class|function|method
     insert_idx: int  # 0-based insertion index in file lines
+    start_idx: int  # 0-based start index (inclusive) of the search window for existing blocks
+    end_idx: int  # 0-based end index (inclusive) of the search window for existing blocks
     indent: str
     size_lines: int
     doc: str
@@ -226,14 +228,29 @@ def _collect_targets(path: Path, text: str) -> list[_Target]:
 
             if doc_expr is not None:
                 end = int(getattr(doc_expr, "end_lineno", doc_expr.lineno))
-                insert_idx = end  # insert on the next line (0-based index)
+                # Insert on the line *after* the docstring expression.
+                insert_idx = end
                 indent = _leading_ws(lines[int(doc_expr.lineno) - 1]) if int(doc_expr.lineno) - 1 < len(lines) else " " * (
                     int(getattr(node, "col_offset", 0)) + 4
                 )
+                start_idx = max(0, int(end))
+                if len(body) >= 2:
+                    next_stmt = body[1]
+                    end_idx = max(start_idx, int(getattr(next_stmt, "lineno")) - 1)
+                else:
+                    end_idx = min(len(lines), start_idx + 50)
             else:
-                insert_idx = int(getattr(first_stmt, "lineno")) - 1
-                indent = _leading_ws(lines[insert_idx]) if 0 <= insert_idx < len(lines) else " " * (
-                    int(getattr(node, "col_offset", 0)) + 4
+                # Insert right after the header (between `def ...:` and the first statement),
+                # not immediately before the first statement. This matches the test's
+                # annotation window and avoids false "missing" reports for blocks that are
+                # already placed at the top of the body.
+                start_idx = max(0, int(getattr(node, "lineno")))
+                insert_idx = start_idx
+                end_idx = max(start_idx, int(getattr(first_stmt, "lineno")) - 1)
+                indent = (
+                    _leading_ws(lines[int(getattr(first_stmt, "lineno")) - 1])
+                    if int(getattr(first_stmt, "lineno")) - 1 < len(lines)
+                    else " " * (int(getattr(node, "col_offset", 0)) + 4)
                 )
 
             size_lines = int(getattr(node, "end_lineno")) - int(getattr(node, "lineno")) + 1
@@ -246,6 +263,8 @@ def _collect_targets(path: Path, text: str) -> list[_Target]:
                     name=name,
                     kind=kind,
                     insert_idx=max(0, int(insert_idx)),
+                    start_idx=max(0, int(start_idx)),
+                    end_idx=max(0, int(end_idx)),
                     indent=indent,
                     size_lines=max(1, int(size_lines)),
                     doc=doc,
@@ -276,9 +295,10 @@ def _collect_targets(path: Path, text: str) -> list[_Target]:
     return out
 
 
-def _has_block(lines: list[str], *, idx: int, indent: str) -> bool:
-    # Look forward a few lines to allow blank lines after docstrings.
-    for start in range(idx, min(len(lines), idx + 8)):
+def _has_block(lines: list[str], *, start_idx: int, end_idx: int, indent: str) -> bool:
+    start_idx = max(0, int(start_idx))
+    end_idx = min(len(lines), max(start_idx, int(end_idx)))
+    for start in range(start_idx, min(len(lines), end_idx + 1)):
         if lines[start].startswith(indent + "# 作用："):
             needed = (
                 indent + "# 作用：",
@@ -306,7 +326,7 @@ def annotate_file(path: Path, *, texts: dict[Path, str]) -> bool:
 
     edits: list[tuple[int, list[str]]] = []
     for t in targets:
-        if _has_block(lines, idx=t.insert_idx, indent=t.indent):
+        if _has_block(lines, start_idx=t.start_idx, end_idx=t.end_idx, indent=t.indent):
             continue
 
         meaning = _extract_meaning(t.doc) or (
@@ -369,7 +389,7 @@ def main(argv: list[str]) -> int:
             lines = before.splitlines(keepends=True)
             missing = 0
             for t in targets:
-                if not _has_block(lines, idx=t.insert_idx, indent=t.indent):
+                if not _has_block(lines, start_idx=t.start_idx, end_idx=t.end_idx, indent=t.indent):
                     missing += 1
             if missing:
                 print(f"{p.relative_to(ROOT)}: missing={missing}")

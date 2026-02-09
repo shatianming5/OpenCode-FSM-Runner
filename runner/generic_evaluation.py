@@ -23,17 +23,10 @@ if __package__ in (None, ""):
         pass
     sys.path.insert(0, root_s)
     from runner.hints_exec import run_hints  # type: ignore
+    from runner._util import _is_truthy, _read_json_object  # type: ignore
 else:
     from .hints_exec import run_hints
-
-
-def _is_truthy(value: str | None) -> bool:
-    # 作用：内部符号：_is_truthy
-    # 能否简略：否
-    # 原因：规模≈3 行；引用次数≈10（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
-    # 证据：位置=runner/generic_evaluation.py:31；类型=function；引用≈10；规模≈3行
-    v = str(value or "").strip().lower()
-    return v in ("1", "true", "yes", "y", "on")
+    from ._util import _is_truthy, _read_json_object
 
 
 def _write_json(path: Path, obj: dict) -> None:
@@ -43,18 +36,6 @@ def _write_json(path: Path, obj: dict) -> None:
     # 证据：位置=runner/generic_evaluation.py:36；类型=function；引用≈18；规模≈3行
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def _read_json_object(path: Path) -> dict | None:
-    # 作用：内部符号：_read_json_object
-    # 能否简略：否
-    # 原因：规模≈6 行；引用次数≈7（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
-    # 证据：位置=runner/generic_evaluation.py:41；类型=function；引用≈7；规模≈6行
-    try:
-        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except Exception:
-        return None
-    return data if isinstance(data, dict) else None
 
 
 def _reward_average_from_rollout(repo_root: Path) -> tuple[bool, float, dict[str, int] | None, str]:

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._util import _ensure_openai_v1_base, _find_hf_test_parquet, _read_json_object
 from .contract_hints import suggest_contract_hints
 from .contract_repair import repair_contract
 from .eval_audit import (
@@ -102,31 +103,6 @@ def _resolve_run_root(repo: Path, *, run_id: str, artifacts_dir: Path | None) ->
     return out
 
 
-def _read_json_object(path: Path) -> dict[str, Any] | None:
-    # 作用：内部符号：_read_json_object
-    # 能否简略：否
-    # 原因：规模≈8 行；引用次数≈7（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
-    # 证据：位置=runner/env.py:90；类型=function；引用≈7；规模≈8行
-    try:
-        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    return data
-
-
-def _ensure_openai_v1_base(base_url: str) -> str:
-    # 作用：内部符号：_ensure_openai_v1_base
-    # 能否简略：是
-    # 原因：规模≈5 行；引用次数≈3（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/env.py:100；类型=function；引用≈3；规模≈5行
-    b = str(base_url or "").strip().rstrip("/")
-    if not b:
-        return ""
-    return b if b.endswith("/v1") else b + "/v1"
-
-
 def _inject_openai_base_compat(overrides: dict[str, str]) -> None:
     """Keep OpenAI-compatible base URL aliases in sync for downstream tools.
 
@@ -197,27 +173,6 @@ def _verification_errors_summary(verify: Any) -> str:
         if cleaned:
             parts.append("verify.metrics_errors:\n" + "\n".join([f"- {x}" for x in cleaned]))
     return "\n".join(parts).strip()
-
-
-def _find_hf_test_parquet(repo_root: Path) -> Path | None:
-    """Best-effort: find an HF dataset test split parquet (generic; no dataset-id hardcoding)."""
-    # 作用：Best-effort: find an HF dataset test split parquet (generic; no dataset-id hardcoding).
-    # 能否简略：是
-    # 原因：规模≈15 行；引用次数≈3（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/env.py:168；类型=function；引用≈3；规模≈15行
-    repo_root = Path(repo_root).resolve()
-    p0 = (repo_root / "main" / "test-00000-of-00001.parquet").resolve()
-    if p0.exists():
-        return p0
-    cands: list[Path] = []
-    for p in repo_root.rglob("test-*.parquet"):
-        try:
-            if p.is_file():
-                cands.append(p.resolve())
-        except Exception:
-            continue
-    cands.sort()
-    return cands[0] if cands else None
 
 
 def _hf_parquet_qa_rows(repo_root: Path) -> int | None:

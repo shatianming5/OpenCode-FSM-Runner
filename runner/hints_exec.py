@@ -15,29 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .security import cmd_allowed
-
-
-def _parse_json_str_list(raw: str | None) -> list[str]:
-    # 作用：内部符号：_parse_json_str_list
-    # 能否简略：部分
-    # 原因：规模≈17 行；引用次数≈5（静态近似，可能包含注释/字符串）；可通过拆分/去重复/抽 helper 减少复杂度，但不建议完全内联
-    # 证据：位置=runner/hints_exec.py:19；类型=function；引用≈5；规模≈17行
-    if not raw:
-        return []
-    try:
-        data = json.loads(str(raw))
-    except Exception:
-        return []
-    if not isinstance(data, list):
-        return []
-    out: list[str] = []
-    for x in data:
-        if not isinstance(x, str):
-            continue
-        s = x.strip()
-        if s:
-            out.append(s)
-    return out
+from ._util import _is_truthy, _parse_json_str_list
 
 
 def _read_hints_file(path: Path) -> list[str]:
@@ -1031,15 +1009,6 @@ def _tail(text: str, n: int) -> str:
     if len(t) <= n:
         return t
     return t[-n:]
-
-
-def _is_truthy(value: str | None) -> bool:
-    # 作用：内部符号：_is_truthy
-    # 能否简略：否
-    # 原因：规模≈3 行；引用次数≈10（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
-    # 证据：位置=runner/hints_exec.py:564；类型=function；引用≈10；规模≈3行
-    v = str(value or "").strip().lower()
-    return v in ("1", "true", "yes", "y", "on")
 
 
 def _docker_available(*, env: dict[str, str]) -> tuple[bool, str]:

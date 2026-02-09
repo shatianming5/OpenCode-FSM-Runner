@@ -4,12 +4,31 @@ import json
 import os
 import random
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
+
+if __package__ in (None, ""):
+    _ROOT = Path(__file__).resolve().parents[1]
+    root_s = str(_ROOT)
+    try:
+        while root_s in sys.path:
+            sys.path.remove(root_s)
+    except Exception:
+        pass
+    sys.path.insert(0, root_s)
+    from runner._util import (  # type: ignore
+        _ensure_openai_v1_base,
+        _find_hf_test_parquet,
+        _parse_json_str_list,
+        _read_json_object,
+    )
+else:
+    from ._util import _ensure_openai_v1_base, _find_hf_test_parquet, _parse_json_str_list, _read_json_object
 
 
 def _now_iso() -> str:
@@ -34,43 +53,6 @@ def _read_text(path: Path, *, max_chars: int) -> str:
     return text
 
 
-def _parse_json_list(raw: str | None) -> list[str]:
-    # 作用：内部符号：_parse_json_list
-    # 能否简略：是
-    # 原因：规模≈17 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/generic_rollout.py:30；类型=function；引用≈2；规模≈17行
-    if not raw:
-        return []
-    try:
-        data = json.loads(str(raw))
-    except Exception:
-        return []
-    if not isinstance(data, list):
-        return []
-    out: list[str] = []
-    for x in data:
-        if not isinstance(x, str):
-            continue
-        s = x.strip()
-        if s:
-            out.append(s)
-    return out
-
-
-def _read_json_object(path: Path) -> dict[str, Any] | None:
-    # 作用：内部符号：_read_json_object
-    # 能否简略：否
-    # 原因：规模≈8 行；引用次数≈7（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
-    # 证据：位置=runner/generic_rollout.py:49；类型=function；引用≈7；规模≈8行
-    try:
-        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    return data
-
-
 def _read_hf_manifest(repo_root: Path) -> dict[str, Any] | None:
     # 作用：内部符号：_read_hf_manifest
     # 能否简略：是
@@ -80,27 +62,6 @@ def _read_hf_manifest(repo_root: Path) -> dict[str, Any] | None:
     if not p.exists():
         return None
     return _read_json_object(p)
-
-
-def _find_test_parquet(repo_root: Path) -> Path | None:
-    """Find a Hugging Face dataset test split parquet file (best-effort)."""
-    # 作用：Find a Hugging Face dataset test split parquet file (best-effort).
-    # 能否简略：是
-    # 原因：规模≈15 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/generic_rollout.py:67；类型=function；引用≈2；规模≈15行
-    # Common HF snapshot layout includes `main/test-00000-of-00001.parquet`.
-    p0 = (repo_root / "main" / "test-00000-of-00001.parquet").resolve()
-    if p0.exists():
-        return p0
-    cands: list[Path] = []
-    for p in repo_root.rglob("test-*.parquet"):
-        try:
-            if p.is_file():
-                cands.append(p.resolve())
-        except Exception:
-            continue
-    cands.sort()
-    return cands[0] if cands else None
 
 
 def _resolve_openai_base(repo_root: Path) -> str:
@@ -136,17 +97,6 @@ def _resolve_openai_base(repo_root: Path) -> str:
     return "https://api.openai.com/v1"
 
 
-def _ensure_v1(base: str) -> str:
-    # 作用：内部符号：_ensure_v1
-    # 能否简略：是
-    # 原因：规模≈5 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/generic_rollout.py:112；类型=function；引用≈2；规模≈5行
-    b = base.rstrip("/")
-    if b.endswith("/v1"):
-        return b
-    return b + "/v1"
-
-
 def _env_int(name: str) -> int | None:
     # 作用：内部符号：_env_int
     # 能否简略：部分
@@ -175,7 +125,7 @@ def _chat_completion(
     # 能否简略：部分
     # 原因：规模≈37 行；引用次数≈3（静态近似，可能包含注释/字符串）；可通过拆分/去重复/抽 helper 减少复杂度，但不建议完全内联
     # 证据：位置=runner/generic_rollout.py:138；类型=function；引用≈3；规模≈37行
-    url = _ensure_v1(base_url) + "/chat/completions"
+    url = _ensure_openai_v1_base(base_url) + "/chat/completions"
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -316,7 +266,7 @@ def _maybe_rollout_hf_qa_parquet(
     if _read_hf_manifest(repo_root) is None:
         return False, {}
 
-    parquet_path = _find_test_parquet(repo_root)
+    parquet_path = _find_hf_test_parquet(repo_root)
     if parquet_path is None:
         return False, {"reason": "hf_manifest_present_but_no_test_parquet"}
 
@@ -405,7 +355,7 @@ def _build_prompts(repo_root: Path, *, n: int) -> list[str]:
     # 能否简略：部分
     # 原因：规模≈27 行；引用次数≈2（静态近似，可能包含注释/字符串）；可通过拆分/去重复/抽 helper 减少复杂度，但不建议完全内联
     # 证据：位置=runner/generic_rollout.py:336；类型=function；引用≈2；规模≈27行
-    hints = _parse_json_list(os.environ.get("AIDER_FSM_HINTS_JSON"))
+    hints = _parse_json_str_list(os.environ.get("AIDER_FSM_HINTS_JSON"))
     prompts: list[str] = []
     for h in hints[: max(0, n)]:
         prompts.append(f"Explain how to run this command and what it does:\n\n{h}")
