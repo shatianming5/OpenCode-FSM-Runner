@@ -48,6 +48,8 @@ Notes:
 
 ## Flow (high-level)
 
+中文说明：整体运行流程是“以目标仓库自带合同为准”的闭环执行。你通过 `runner_env.setup(target)` 传入一个 repo URL/本地路径（或 HF 数据集快照）后，runner 会先解析/打开目标环境并尝试加载 `pipeline.yml`；如果目标仓库缺少 `pipeline.yml`，会调用 OpenCode 生成最小可运行的 scaffold 合同（写入 `pipeline.yml` 与 `.aider_fsm/` 目录）并做基本校验。随后返回 `EnvSession`，`sess.rollout(llm, ...)` 会按合同执行 deploy（可先跑 `.aider_fsm/bootstrap.yml` 做环境准备）并要求 deploy 写出 `.aider_fsm/runtime_env.json`，再执行 rollout 并写出 `.aider_fsm/rollout.json`（需要时包含 samples JSONL）；任何阶段失败时会进入“repair 重试”循环：runner 触发 OpenCode 只在 `.aider_fsm/` 下修复脚本/配置并重新验证。最后 `sess.evaluate(...)` 按合同运行 evaluation/benchmark 并写出 `.aider_fsm/metrics.json`（必要时还要生成 `.aider_fsm/hints_used.json` 证明执行过官方命令），验证通过后做 best-effort 的 deploy teardown。整个过程中 runner 会把每次 attempt 的 stdout/stderr、验证结果与 provenance 证据落盘到 `.aider_fsm/artifacts/<run_id>/...`，以便审计与复现。
+
 ```mermaid
 flowchart TD
     A["runner_env.setup(target)"] --> B["open_env: resolve target repo<br/>path/git/HF dataset"]
