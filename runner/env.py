@@ -432,7 +432,8 @@ class EnvSession:
         """中文说明：
         - 含义：规范化审计开关（on/off/warn-only）。
         - 内容：用于控制 evaluation 阶段的脚本审计强度：`on` 表示审计失败会视为失败，`warn-only` 表示只记录告警，`off` 表示跳过审计。
-        - 可简略：可能（小函数；但集中规则可避免各处重复判断与默认值漂移）。
+        - 可简略：部分
+        - 原因：逻辑很短可以内联，但把默认值与允许取值集中在一处能避免调用点重复判断与默认值漂移。
         """
         # 作用：内部符号：EnvSession._audit_mode
         # 能否简略：部分
@@ -447,7 +448,8 @@ class EnvSession:
         """中文说明：
         - 含义：把本次运行选定的 LLM 形态写入 env（形成稳定、可复现的“LLM 合同”）。
         - 内容：`remote` 模式写入 `AIDER_LLM_KIND/AIDER_LLM_MODEL/OPENAI_MODEL`；`local_hf` 模式写入 `AIDER_TRAINED_MODEL_DIR`（并清理 remote 字段）。
-        - 可简略：部分（代码不长，但这是 deploy/rollout/evaluation 一致性与可审计性的关键入口）。
+        - 可简略：部分
+        - 原因：实现不长但承担“把 LLM 选择固化为可审计 env 合同”的职责；完全内联会让不同 stage 更容易出现字段不一致。
         """
         # 作用：Force a consistent LLM contract into env vars (no hardcoded paths/endpoints).
         # 能否简略：是
@@ -476,7 +478,8 @@ class EnvSession:
         """中文说明：
         - 含义：构造本次 stage 运行的基础环境变量覆盖层（env_overrides）。
         - 内容：注入 run_id / mode / hints（如有）/ runtime_env_path（如有）等通用字段，并做 OpenAI base URL 兼容注入。
-        - 可简略：部分（属于集中“拼 env”的地方，虽然可拆分，但拆散会让合同字段更难追踪）。
+        - 可简略：部分
+        - 原因：这是集中“拼 env 合同字段”的位置；拆散会降低可追踪性并更容易导致不同入口的 env 语义不一致。
         """
         # 作用：内部符号：EnvSession._base_overrides
         # 能否简略：部分
@@ -513,7 +516,8 @@ class EnvSession:
         """中文说明：
         - 含义：根据 `.aider_fsm/runtime_env.json` 推断并补齐推理端所需的 OpenAI 兼容配置。
         - 内容：优先使用 runtime_env.json 提供的 base_url/model；对 local_hf 模式设置默认 OPENAI_API_KEY=local；避免被宿主环境里的旧配置污染。
-        - 可简略：部分（逻辑不复杂，但对“本地推理端点自动复用”很关键）。
+        - 可简略：部分
+        - 原因：逻辑不复杂，但它决定是否能自动复用 deploy 产出的推理端点/模型配置；随意内联或改动更容易引入环境污染问题。
         """
         # 作用：内部符号：EnvSession._apply_runtime_env_inference_overrides
         # 能否简略：是
@@ -549,7 +553,8 @@ class EnvSession:
         """中文说明：
         - 含义：执行一次完整 rollout 流程（deploy -> rollout），必要时自动触发合同修复（repair）。
         - 内容：为每次 attempt 写入 artifacts；失败时调用 OpenCode 修复 `.aider_fsm/**` 后重试；成功时返回 rollout.json 路径与验证结果。
-        - 可简略：否（这是对外 API 的核心编排点，包含重试/修复/落盘证据，简化会降低可诊断性）。
+        - 可简略：否
+        - 原因：这是对外 API 的核心编排点，包含重试/修复/落盘证据与可审计边界；过度简化会降低可诊断性并改变外部行为预期。
         """
         # 作用：内部符号：EnvSession.rollout
         # 能否简略：否
@@ -685,7 +690,8 @@ class EnvSession:
         """中文说明：
         - 含义：内部实现：执行 evaluation（以及必要时的 deploy/rollout），并在失败时触发 repair 重试。
         - 内容：优先走“复用 runtime_env 的快速路径”（仅跑 evaluation）；否则走完整 deploy -> rollout -> evaluation；可选进行脚本审计与 metrics 合同校验。
-        - 可简略：部分（逻辑较长，可拆分子步骤；但不建议完全拆散以免编排语义分裂）。
+        - 可简略：部分
+        - 原因：逻辑较长可拆分子步骤，但这里承载了“快速路径 vs 全流程”以及 repair 重试的编排语义，拆散过度会让行为边界更难维护。
         """
         # 作用：内部符号：EnvSession._evaluation
         # 能否简略：部分
@@ -890,7 +896,8 @@ class EnvSession:
         """中文说明：
         - 含义：执行 evaluation（写出 metrics.json），并在必要时自动 teardown。
         - 内容：可选接收 `llm` 作为便捷参数（覆盖 session 的 LLM 选择）；内部调用 `_evaluation()`，最后 best-effort 执行 deploy_teardown。
-        - 可简略：否（公共 API；承诺“最终 teardown”语义，简化会改变外部行为预期）。
+        - 可简略：否
+        - 原因：这是公共 API，承诺“无论成功失败都 best-effort teardown”的语义；内联/改动容易改变对外行为与资源回收保证。
         """
         # 作用：内部符号：EnvSession.evaluate
         # 能否简略：否

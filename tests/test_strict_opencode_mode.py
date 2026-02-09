@@ -131,6 +131,12 @@ class _SecondAttemptWritesContractAgent:
     # 原因：测试代码（优先可读性）；规模≈14 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
     # 证据：位置=tests/test_strict_opencode_mode.py:117；类型=class；引用≈2；规模≈14行
     def __init__(self, repo: Path) -> None:
+        """中文说明：
+        - 含义：测试用 agent：记录 repo 与调用次数，用于模拟“第一次 scaffold 不产出合同，第二次才产出”的场景。
+        - 内容：保存 `repo`，并初始化 `calls=0`。
+        - 可简略：是
+        - 原因：纯测试替身；只要能提供最小状态即可。
+        """
         # 作用：内部符号：_SecondAttemptWritesContractAgent.__init__
         # 能否简略：是
         # 原因：测试代码（优先可读性）；规模≈3 行；引用次数≈1（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
@@ -139,6 +145,12 @@ class _SecondAttemptWritesContractAgent:
         self.calls = 0
 
     def run(self, _text: str, *, fsm_state: str, iter_idx: int, purpose: str) -> AgentResult:
+        """中文说明：
+        - 含义：测试用的 `run()`：在 scaffold_contract 场景下第 2 次调用时写入一份有效合同。
+        - 内容：当 `purpose == \"scaffold_contract\"` 时递增 `calls`；若 `calls >= 2` 则调用 `_write_valid_contract(repo)`；返回带计数的 assistant_text。
+        - 可简略：是
+        - 原因：纯测试逻辑，用于稳定触发 retry 分支与成功分支。
+        """
         # 作用：内部符号：_SecondAttemptWritesContractAgent.run
         # 能否简略：否
         # 原因：测试代码（优先可读性）；规模≈6 行；引用次数≈29（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
@@ -150,6 +162,12 @@ class _SecondAttemptWritesContractAgent:
         return AgentResult(assistant_text=f"attempt={self.calls}")
 
     def close(self) -> None:
+        """中文说明：
+        - 含义：测试用的 close（无资源需要释放）。
+        - 内容：no-op。
+        - 可简略：是
+        - 原因：测试替身不持有外部资源（进程/句柄），保留方法只是为了满足 AgentClient 协议形状。
+        """
         # 作用：内部符号：_SecondAttemptWritesContractAgent.close
         # 能否简略：否
         # 原因：测试代码（优先可读性）；规模≈2 行；引用次数≈10（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性

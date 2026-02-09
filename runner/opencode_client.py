@@ -70,7 +70,8 @@ class OpenCodeRequestError(RuntimeError):
         """中文说明：
         - 含义：构造带上下文信息的请求异常。
         - 内容：把 method/url/status/detail 写入属性，便于调用方判断（如 400/422 时做 model 字段兼容回退）。
-        - 可简略：可能（实现简单；但建议保留属性字段以便调试）。
+        - 可简略：部分
+        - 原因：实现简单但保留结构化字段能显著提升诊断与兼容性回退（例如按 status 做分支）。
         """
         # 作用：中文说明：
         # 能否简略：是
@@ -120,7 +121,8 @@ class OpenCodeClient(AgentClient):
         """中文说明：
         - 含义：初始化 OpenCodeClient（模型选择、server 连接/启动、健康检查、创建 session）。
         - 内容：当 `base_url` 为空时会启动本地 server 进程并写日志；随后创建 session 并保留 session_id；bash 权限由 bash_mode/scaffold_bash_mode 与 purpose 共同决定。
-        - 可简略：否（涉及进程管理/认证/兼容性与关键默认值）。
+        - 可简略：否
+        - 原因：涉及进程管理/端口选择/认证、兼容性回退与关键默认值；简化容易引入资源泄漏或连接不稳定。
         """
         # 作用：中文说明：
         # 能否简略：否
@@ -243,7 +245,8 @@ class OpenCodeClient(AgentClient):
         """中文说明：
         - 含义：释放 OpenCodeClient 资源（best-effort）。
         - 内容：尝试调用 `/instance/dispose`；若是本地启动的 server，则 terminate/kill 进程并关闭日志文件句柄。
-        - 可简略：否（避免后台进程泄漏）。
+        - 可简略：否
+        - 原因：资源回收语义关键，必须避免本地 server 进程或文件句柄泄漏。
         """
         # 作用：中文说明：
         # 能否简略：否
@@ -261,7 +264,8 @@ class OpenCodeClient(AgentClient):
         """中文说明：
         - 含义：best-effort 停止由当前 OpenCodeClient 启动的本地 server 进程。
         - 内容：先尝试调用 `/instance/dispose` 做优雅释放；随后 terminate/kill 进程组；最后关闭 server log 文件句柄。
-        - 可简略：部分（可抽更小的进程清理 helper；但必须保留“不泄漏后台进程”的语义）。
+        - 可简略：部分
+        - 原因：可以抽出更小的进程清理 helper，但必须保留“优雅释放 + 强制 kill 兜底 + 不泄漏后台进程”的语义。
         """
         # 作用：Best-effort stop for locally-owned OpenCode server process.
         # 能否简略：部分
@@ -306,7 +310,8 @@ class OpenCodeClient(AgentClient):
         """中文说明：
         - 含义：执行一次 agent 调用（含 tool loop）。
         - 内容：发送 prompt → 获取 assistant 输出 → 解析 tool-calls → 执行并回灌 `tool_result` → 重复最多 20 轮；若无 tool-call 则直接返回最终文本。
-        - 可简略：否（tool loop 是闭环能力的核心实现）。
+        - 可简略：否
+        - 原因：tool loop 是“能实际改文件/跑命令并回灌结果”的闭环核心；简化会直接削弱 contract scaffold/repair 能力。
         """
         # 作用：中文说明：
         # 能否简略：否
@@ -438,7 +443,8 @@ class OpenCodeClient(AgentClient):
         """中文说明：
         - 含义：在本地启动 OpenCode server（`opencode serve`）。
         - 内容：选择一个空闲端口；生成随机 password；设置 OPENCODE_SERVER_* 环境变量；可选写 server log 到 artifacts。
-        - 可简略：否（进程/端口/认证管理是关键；实现需要谨慎）。
+        - 可简略：否
+        - 原因：进程/端口/认证管理属于稳定性与安全关键路径；实现需要谨慎，简化容易导致端口冲突或认证失效。
         """
         # 作用：中文说明：
         # 能否简略：否
@@ -496,7 +502,8 @@ class OpenCodeClient(AgentClient):
         """中文说明：
         - 含义：发送 message 请求并在超时/瞬时错误时自动重试。
         - 内容：支持 `request_retry_attempts` + 指数退避；若 `contextLength` 字段不被服务端接受，会自动降级重发一次。
-        - 可简略：否（是提升 scaffold/repair 稳定性的关键逻辑）。
+        - 可简略：否
+        - 原因：这是提升 scaffold/repair 稳定性的关键逻辑（重试、退避、字段兼容回退、会话恢复）。
         """
         # 作用：中文说明：
         # 能否简略：否
@@ -653,7 +660,8 @@ class OpenCodeClient(AgentClient):
         """中文说明：
         - 含义：向当前 session 发送一条消息（prompt），返回 server 的 message JSON。
         - 内容：body 里包含 agent 类型、model、parts；由 `_request_json` 完成 HTTP 细节与错误包装。
-        - 可简略：可能（薄封装；但把请求体结构集中在一处更易维护）。
+        - 可简略：部分
+        - 原因：属于薄封装，但把请求体结构（字段名/裁剪策略/contextLength）集中在一处更易维护与做兼容回退。
         """
         # 作用：中文说明：
         # 能否简略：部分
@@ -695,7 +703,8 @@ class OpenCodeClient(AgentClient):
         """中文说明：
         - 含义：执行一次 OpenCode HTTP 请求并解析 JSON 响应。
         - 内容：支持可选 Basic Auth；body 会被编码为 JSON；HTTPError/URLError 会被包装为 OpenCodeRequestError（截断 detail 以控制体积）。
-        - 可简略：否（HTTP I/O 与错误处理的核心封装；影响稳定性与可诊断性）。
+        - 可简略：否
+        - 原因：这是 HTTP I/O 与错误处理的核心封装，直接影响稳定性、可诊断性与上层的兼容性回退行为。
         """
         # 作用：中文说明：
         # 能否简略：部分

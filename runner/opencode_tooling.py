@@ -762,7 +762,8 @@ class ToolPolicy:
         """中文说明：
         - 含义：判断是否允许读取该文件。
         - 内容：禁止读取 dotenv；禁止 repo 外路径。
-        - 可简略：可能（规则较少；但建议保留集中入口）。
+        - 可简略：部分
+        - 原因：规则较少理论上可内联，但作为集中入口便于审计与后续扩展（避免调用点散落各处）。
         """
         # 作用：中文说明：
         # 能否简略：否
@@ -782,7 +783,8 @@ class ToolPolicy:
           - plan_update/mark_done/block_step：只允许写 `PLAN.md`
           - execute_step：禁止写 PLAN/pipeline
           - fix_or_replan：禁止写 pipeline
-        - 可简略：否（权限隔离的关键；简化易导致越权写入）。
+        - 可简略：否
+        - 原因：这是权限隔离的关键边界；简化或拆散容易造成越权写入或策略漏判。
         """
         # 作用：中文说明：
         # 能否简略：否
@@ -830,7 +832,8 @@ class ToolPolicy:
         """中文说明：
         - 含义：判断是否允许执行某条 bash 命令。
         - 内容：restricted 模式走 `_restricted_bash_allowed`；full 模式则复用 `security.cmd_allowed` 与 strict 的交互阻断。
-        - 可简略：否（命令执行安全边界）。
+        - 可简略：否
+        - 原因：这是命令执行安全边界（restricted/full + unattended 交互阻断）；不宜分散到多处以免策略失配。
         """
         # 作用：中文说明：
         # 能否简略：否
