@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import configparser
 import json
 import os
 import re
@@ -8,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -155,6 +157,224 @@ _SHELL_BUILTINS = {
     "unset",
     "wait",
 }
+
+
+_PY_MAJOR_MINOR_RE = re.compile(r"(?P<major>\d+)\.(?P<minor>\d+)")
+
+
+def _as_major_minor(raw: str | None) -> str:
+    # 作用：内部符号：_as_major_minor
+    # 能否简略：是
+    # 原因：规模≈14 行；引用次数≈5（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
+    # 证据：位置=runner/hints_exec.py；类型=function；引用≈5；规模≈14行
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    m = _PY_MAJOR_MINOR_RE.search(s)
+    if not m:
+        return ""
+    try:
+        major = int(m.group("major"))
+        minor = int(m.group("minor"))
+    except Exception:
+        return ""
+    if major <= 0 or minor < 0:
+        return ""
+    return f"{major}.{minor}"
+
+
+def _infer_repo_python_pin(repo: Path) -> str:
+    """Infer a repo's preferred Python major.minor from common version pin files."""
+    # 作用：Infer a repo's preferred Python major.minor from common version pin files.
+    # 能否简略：部分
+    # 原因：多来源探测（.python-version/.tool-versions）；属于兼容性策略的一部分；规模≈33 行；引用次数≈1（静态近似，可能包含注释/字符串）
+    # 证据：位置=runner/hints_exec.py；类型=function；引用≈1；规模≈33行
+    repo = Path(repo).resolve()
+    for rel in (".python-version", "runtime.txt"):
+        p = (repo / rel).resolve()
+        try:
+            if not p.exists() or not p.is_file():
+                continue
+            for raw in p.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                mm = _as_major_minor(line)
+                if mm:
+                    return mm
+                break
+        except Exception:
+            continue
+
+    p = (repo / ".tool-versions").resolve()
+    try:
+        if p.exists() and p.is_file():
+            for raw in p.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if not line.startswith("python"):
+                    continue
+                parts = line.split()
+                if len(parts) >= 2:
+                    mm = _as_major_minor(parts[1])
+                    if mm:
+                        return mm
+    except Exception:
+        pass
+    return ""
+
+
+def _infer_repo_requires_python(repo: Path) -> str:
+    """Infer a repo's `requires-python` style spec (best-effort)."""
+    # 作用：Infer a repo's `requires-python` style spec (best-effort).
+    # 能否简略：部分
+    # 原因：覆盖 pyproject/setup.cfg/setup.py 三类常见声明；用于选择可用解释器；规模≈63 行；引用次数≈1（静态近似，可能包含注释/字符串）
+    # 证据：位置=runner/hints_exec.py；类型=function；引用≈1；规模≈63行
+    repo = Path(repo).resolve()
+    pyproject = (repo / "pyproject.toml").resolve()
+    if pyproject.exists() and pyproject.is_file():
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(data, dict):
+                proj = data.get("project")
+                if isinstance(proj, dict):
+                    rp = proj.get("requires-python")
+                    if isinstance(rp, str) and rp.strip():
+                        return rp.strip()
+                tool = data.get("tool")
+                if isinstance(tool, dict):
+                    poetry = tool.get("poetry")
+                    if isinstance(poetry, dict):
+                        deps = poetry.get("dependencies")
+                        if isinstance(deps, dict):
+                            py = deps.get("python")
+                            if isinstance(py, str) and py.strip():
+                                return py.strip()
+        except Exception:
+            pass
+
+    setup_cfg = (repo / "setup.cfg").resolve()
+    if setup_cfg.exists() and setup_cfg.is_file():
+        try:
+            cp = configparser.ConfigParser()
+            cp.read(setup_cfg, encoding="utf-8")
+            if cp.has_option("options", "python_requires"):
+                v = str(cp.get("options", "python_requires") or "").strip()
+                if v:
+                    return v
+        except Exception:
+            pass
+
+    setup_py = (repo / "setup.py").resolve()
+    if setup_py.exists() and setup_py.is_file():
+        try:
+            text = setup_py.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r"(?i)python_requires\\s*=\\s*['\\\"]([^'\\\"]+)['\\\"]", text)
+            if m:
+                v = str(m.group(1) or "").strip()
+                if v:
+                    return v
+        except Exception:
+            pass
+    return ""
+
+
+def _best_python_minor_from_spec(spec: str, *, candidates: list[str]) -> str:
+    """Pick the highest major.minor in candidates that satisfies a python spec string."""
+    # 作用：Pick the highest major.minor in candidates that satisfies a python spec string.
+    # 能否简略：部分
+    # 原因：优先用 packaging 精确匹配；缺失时回退到启发式；用于 uv/venv 选择；规模≈46 行；引用次数≈1（静态近似，可能包含注释/字符串）
+    # 证据：位置=runner/hints_exec.py；类型=function；引用≈1；规模≈46行
+    s = str(spec or "").strip()
+    if not s:
+        return ""
+    try:
+        from packaging.specifiers import SpecifierSet  # type: ignore
+        from packaging.version import Version  # type: ignore
+
+        ss = SpecifierSet(s)
+        for mm in candidates:
+            try:
+                if Version(f"{mm}.0") in ss:
+                    return mm
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Heuristic fallback when packaging isn't available or the spec isn't PEP 440 (e.g. Poetry's ^3.11).
+    # Try explicit major.minor mentions first.
+    for mm in candidates:
+        if mm in s:
+            return mm
+    # Try simple upper-bound patterns like "<3.13" -> choose 3.12, etc.
+    m = re.search(r"<\\s*(\\d+)\\.(\\d+)", s)
+    if m:
+        try:
+            major = int(m.group(1))
+            minor = int(m.group(2))
+        except Exception:
+            major = 0
+            minor = 0
+        if major > 0:
+            want = f"{major}.{max(0, minor - 1)}"
+            if want in candidates:
+                return want
+    return ""
+
+
+def _infer_uv_python_candidates(repo: Path, *, env: dict[str, str]) -> list[str]:
+    """Infer a list of uv `--python` requests to try (most preferred first)."""
+    # 作用：Infer a list of uv `--python` requests to try (most preferred first).
+    # 能否简略：否
+    # 原因：把“显式配置 + repo 元数据 + 安全默认值”整合为统一策略；避免写死 py311；规模≈48 行；引用次数≈1（静态近似，可能包含注释/字符串）
+    # 证据：位置=runner/hints_exec.py；类型=function；引用≈1；规模≈48行
+    env2 = dict(env or {})
+    out: list[str] = []
+
+    raw_candidates = _parse_json_str_list(env2.get("AIDER_FSM_HINT_UV_PYTHON_CANDIDATES_JSON"))
+    if raw_candidates:
+        out.extend([c.strip() for c in raw_candidates if isinstance(c, str) and c.strip()])
+    else:
+        single = str(env2.get("AIDER_FSM_HINT_UV_PYTHON") or env2.get("UV_PYTHON") or "").strip()
+        if single:
+            out.append(single)
+
+    if not out:
+        pinned = _infer_repo_python_pin(repo)
+        if pinned:
+            out.append(pinned)
+
+    if not out:
+        spec = _infer_repo_requires_python(repo)
+        if spec:
+            # Prefer newer stable minors first when we need to choose.
+            prefer = ["3.12", "3.11", "3.10", "3.9", "3.8"]
+            picked = _best_python_minor_from_spec(spec, candidates=prefer)
+            if picked:
+                out.append(picked)
+            else:
+                # As a last resort, pick any explicit X.Y mention.
+                mm = _as_major_minor(spec)
+                if mm:
+                    out.append(mm)
+
+    if not out and sys.version_info >= (3, 13):
+        # Safe defaults when running under very new Python versions: prefer a stable minor
+        # with broad wheel availability.
+        out.extend(["3.12", "3.11"])
+
+    # Deduplicate while preserving order.
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for v in out:
+        s = str(v or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        cleaned.append(s)
+    return cleaned
 
 
 def _canonical_base_url(url: str | None) -> str:
@@ -546,6 +766,77 @@ def normalize_hint_command(cmd: str, *, env: dict[str, str]) -> tuple[str, str |
         return line
 
     s2 = "\n".join([_rewrite_line(line) for line in s2.splitlines() if line.strip()]).strip()
+
+    py_is_path = ("/" in py) or py.startswith((".", "~"))
+
+    def _maybe_rewrite_python_tools(line: str) -> str:
+        """Best-effort: route python/pip/pytest invocations to the repo-provided interpreter.
+
+        This avoids accidentally picking up a global interpreter (e.g. Py3.13) when the
+        repo is bootstrapped with a specific venv under `.aider_fsm/`.
+        """
+        # 作用：内部符号：normalize_hint_command._maybe_rewrite_python_tools
+        # 能否简略：部分
+        # 原因：提升 hints 对“任意 python 脚本入口”的稳定性（不仅是 pytest）；但需要谨慎 shlex 解析与重建；规模≈57 行
+        # 证据：位置=runner/hints_exec.py；类型=function；引用≈1；规模≈57行
+        if not py_is_path:
+            return line
+        try:
+            parts = shlex.split(line, posix=True)
+        except Exception:
+            return line
+        if not parts:
+            return line
+
+        def _is_py(tok: str) -> bool:
+            # 作用：内部符号：normalize_hint_command._maybe_rewrite_python_tools._is_py
+            # 能否简略：是
+            # 原因：小型谓词；集中处理 python/python3/python3.11 等模式；规模≈7 行
+            # 证据：位置=runner/hints_exec.py；类型=function；引用≈2；规模≈7行
+            t = str(tok or "").strip()
+            if t in ("python", "python3"):
+                return True
+            return bool(re.fullmatch(r"python\\d+(?:\\.\\d+)?", t))
+
+        def _is_pip(tok: str) -> bool:
+            # 作用：内部符号：normalize_hint_command._maybe_rewrite_python_tools._is_pip
+            # 能否简略：是
+            # 原因：小型谓词；集中处理 pip/pip3/pip3.11 等模式；规模≈7 行
+            # 证据：位置=runner/hints_exec.py；类型=function；引用≈2；规模≈7行
+            t = str(tok or "").strip()
+            if t in ("pip", "pip3"):
+                return True
+            return bool(re.fullmatch(r"pip\\d+(?:\\.\\d+)?", t))
+
+        prefix: list[str] = []
+        i = 0
+        while i < len(parts) and _ENV_ASSIGN_RE.match(str(parts[i] or "").strip()):
+            prefix.append(str(parts[i] or ""))
+            i += 1
+        if i < len(parts) and str(parts[i] or "") == "env":
+            prefix.append("env")
+            i += 1
+            while i < len(parts) and _ENV_ASSIGN_RE.match(str(parts[i] or "").strip()):
+                prefix.append(str(parts[i] or ""))
+                i += 1
+        if i >= len(parts):
+            return line
+
+        cmd0 = str(parts[i] or "")
+        rest = [str(x or "") for x in parts[i + 1 :]]
+
+        if cmd0 != py and _is_py(cmd0):
+            cmd0 = py
+        elif _is_pip(cmd0):
+            cmd0 = py
+            rest = ["-m", "pip"] + rest
+        elif cmd0 == "pytest":
+            cmd0 = py
+            rest = ["-m", "pytest"] + rest
+
+        return " ".join(shlex.quote(x) for x in (prefix + [cmd0] + rest)).strip()
+
+    s2 = "\n".join([_maybe_rewrite_python_tools(line) for line in s2.splitlines() if line.strip()]).strip()
 
     def _looks_like_fire_cli(line: str) -> bool:
         """Heuristic: console-script entrypoints like `pkg.subcmd` are often python-fire CLIs."""
@@ -972,7 +1263,7 @@ def run_hints(
     login_shell = _is_truthy(env2.get("AIDER_FSM_HINT_LOGIN_SHELL"))
     strict_compat = _is_truthy(env2.get("AIDER_FSM_HINT_STRICT_COMPAT", "1"))
     require_real_score = _is_truthy(env2.get("AIDER_FSM_REQUIRE_REAL_SCORE"))
-    auto_uv_py311 = _is_truthy(env2.get("AIDER_FSM_HINT_AUTO_UV_PY311", "1"))
+    auto_uv_venv = _is_truthy(env2.get("AIDER_FSM_HINT_AUTO_UV", env2.get("AIDER_FSM_HINT_AUTO_UV_PY311", "1")))
     artifacts_dir_s = str(env2.get("AIDER_FSM_ARTIFACTS_DIR") or "").strip()
     artifacts_dir: Path | None = None
     if artifacts_dir_s:
@@ -982,13 +1273,15 @@ def run_hints(
         except Exception:
             artifacts_dir = None
 
-    uv_py_req = str(env2.get("AIDER_FSM_HINT_UV_PYTHON") or env2.get("UV_PYTHON") or "").strip()
-    if not uv_py_req and sys.version_info >= (3, 13):
-        # Python 3.13 is still unsupported by some popular C-extension deps (e.g. greenlet).
-        # Prefer a stable default when the runner itself is executed under 3.13+.
-        uv_py_req = "3.11"
+    uv_py_candidates = _infer_uv_python_candidates(repo, env=env2)
+    uv_py_env_default = str(env2.get("AIDER_FSM_HINT_UV_PYTHON") or env2.get("UV_PYTHON") or "").strip()
+    if not uv_py_env_default and sys.version_info >= (3, 13) and uv_py_candidates:
+        # When the runner itself is executed under a very new Python, steer uv toward a
+        # stable minor with broad wheel availability, unless the caller already pinned it.
+        uv_py_env_default = uv_py_candidates[0]
 
-    uv_py311_env: dict[str, str] | None = None
+    uv_hint_env: dict[str, str] | None = None
+    uv_hint_env_py: str = ""
 
     def _looks_like_py_incompat_build_failure(text: str) -> bool:
         # 作用：内部符号：run_hints._looks_like_py_incompat_build_failure
@@ -1008,61 +1301,80 @@ def run_hints(
             return True
         return False
 
-    def _ensure_uv_py311_env() -> tuple[dict[str, str] | None, str]:
-        # 作用：内部符号：run_hints._ensure_uv_py311_env
+    def _ensure_uv_hint_env() -> tuple[dict[str, str] | None, str, str]:
+        # 作用：内部符号：run_hints._ensure_uv_hint_env
         # 能否简略：否
-        # 原因：把“失败后切 uv+py311 venv 重试”的策略封装到一个点，避免散落在执行循环里
-        # 证据：位置=runner/hints_exec.py；类型=function；引用≈1；规模≈60行
-        nonlocal uv_py311_env
-        if uv_py311_env is not None:
-            return uv_py311_env, "ok"
-        if not auto_uv_py311:
-            return None, "disabled"
+        # 原因：把“失败后切 uv venv（按候选 Python 版本）重试”的策略封装到一个点；避免写死 py311
+        # 证据：位置=runner/hints_exec.py；类型=function；引用≈1；规模≈95行
+        nonlocal uv_hint_env, uv_hint_env_py
+        if uv_hint_env is not None:
+            return uv_hint_env, "cached", uv_hint_env_py
+        if not auto_uv_venv:
+            return None, "disabled", ""
         if shutil.which("uv") is None:
-            return None, "uv_not_found"
-        py_req = uv_py_req or "3.11"
-        try:
-            m = re.match(r"^\s*(\d+)\.(\d+)\s*$", py_req)
-            tag = f"py{m.group(1)}{m.group(2)}" if m else "py"
-        except Exception:
-            tag = "py"
+            return None, "uv_not_found", ""
+        if not uv_py_candidates:
+            return None, "no_uv_python_candidates", ""
+
         raw_venv_dir = str(env2.get("AIDER_FSM_HINT_UV_VENV_DIR") or "").strip()
-        if raw_venv_dir:
-            venv_dir = Path(raw_venv_dir).expanduser()
-            if not venv_dir.is_absolute():
-                venv_dir = (repo / venv_dir).resolve()
-        else:
-            venv_dir = (repo / ".aider_fsm" / f"venv_hints_{tag}").resolve()
-        py_bin = (venv_dir / "bin" / "python").absolute()
-        try:
-            venv_dir.parent.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-        try:
-            res = subprocess.run(
-                ["uv", "venv", "--allow-existing", "--seed", "pip", "--python", py_req, str(venv_dir)],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=600,
-                cwd=str(repo),
-                env=env2,
-            )
-        except Exception as e:
-            return None, f"uv_venv_failed:{e}"
-        if int(getattr(res, "returncode", 1) or 1) != 0:
-            tail = _tail(str(getattr(res, "stderr", "") or "") + "\n" + str(getattr(res, "stdout", "") or ""), 4000)
-            return None, f"uv_venv_failed_rc={getattr(res, 'returncode', None)}:{tail}"
-        envx = dict(env2)
-        old_path = str(envx.get("PATH") or "")
-        envx["PATH"] = str((venv_dir / "bin").absolute()) + (os.pathsep + old_path if old_path else "")
-        envx["VIRTUAL_ENV"] = str(venv_dir.absolute())
-        envx["AIDER_FSM_PYTHON"] = str(py_bin)
-        envx["PYTHON"] = str(py_bin)
-        if uv_py_req:
-            envx.setdefault("UV_PYTHON", uv_py_req)
-        uv_py311_env = envx
-        return uv_py311_env, "ok"
+        uv_try = [uv_py_candidates[0]] if raw_venv_dir else list(uv_py_candidates)
+
+        last_err = ""
+        for py_req in uv_try:
+            try:
+                m = re.match(r"^\\s*(\\d+)\\.(\\d+)\\s*$", py_req)
+                tag = f"py{m.group(1)}{m.group(2)}" if m else "py"
+            except Exception:
+                tag = "py"
+
+            if raw_venv_dir:
+                venv_dir = Path(raw_venv_dir).expanduser()
+                if not venv_dir.is_absolute():
+                    venv_dir = (repo / venv_dir).resolve()
+            else:
+                venv_dir = (repo / ".aider_fsm" / f"venv_hints_{tag}").resolve()
+            py_bin = (venv_dir / "bin" / "python").absolute()
+            try:
+                venv_dir.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            try:
+                res = subprocess.run(
+                    ["uv", "venv", "--allow-existing", "--seed", "pip", "--python", py_req, str(venv_dir)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                    cwd=str(repo),
+                    env=env2,
+                )
+            except Exception as e:
+                last_err = f"uv_venv_failed:{e}"
+                continue
+            try:
+                rc_i = int(getattr(res, "returncode", 1))
+            except Exception:
+                rc_i = 1
+            if rc_i != 0:
+                tail = _tail(
+                    str(getattr(res, "stderr", "") or "") + "\n" + str(getattr(res, "stdout", "") or ""),
+                    2500,
+                )
+                last_err = f"uv_venv_failed_rc={getattr(res, 'returncode', None)}:{tail}"
+                continue
+
+            envx = dict(env2)
+            old_path = str(envx.get("PATH") or "")
+            envx["PATH"] = str((venv_dir / "bin").absolute()) + (os.pathsep + old_path if old_path else "")
+            envx["VIRTUAL_ENV"] = str(venv_dir.absolute())
+            envx["AIDER_FSM_PYTHON"] = str(py_bin)
+            envx["PYTHON"] = str(py_bin)
+            envx.setdefault("UV_PYTHON", str(py_req).strip())
+            uv_hint_env = envx
+            uv_hint_env_py = str(py_req).strip()
+            return uv_hint_env, "ok", uv_hint_env_py
+
+        return None, last_err or "uv_venv_failed", ""
 
     def _priority(raw: str) -> int:
         # 作用：内部符号：run_hints._priority
@@ -1575,9 +1887,9 @@ if len(seen) <= 0:
         # (e.g. `.aider_fsm/venv/bin:$PATH`) are preserved. Login shells frequently
         # reset PATH via /etc/profile and can accidentally select global tools.
         env3: dict[str, str] = env2
-        if uv_py_req:
+        if uv_py_env_default:
             env3 = dict(env3)
-            env3.setdefault("UV_PYTHON", uv_py_req)
+            env3.setdefault("UV_PYTHON", uv_py_env_default)
         if workdir != repo:
             # When running from an artifacts workdir, keep the repo root importable
             # for `python -m pkg.mod` style hints that rely on local modules.
@@ -1594,21 +1906,23 @@ if len(seen) <= 0:
         rc, out, err, this_timed_out = _exec(sanitized, env=env3)
 
         # If we see a Python/C-extension build failure (common on Py3.13), retry once
-        # inside a uv-managed Py3.11 venv.
+        # inside a uv-managed venv with a more compatible Python.
         if (
             rc != 0
             and not this_timed_out
-            and auto_uv_py311
-            and sys.version_info >= (3, 13)
+            and auto_uv_venv
             and _looks_like_py_incompat_build_failure((_tail(out, 20000) + "\n" + _tail(err, 20000)))
         ):
-            env_py311, prep_reason = _ensure_uv_py311_env()
-            if env_py311 is not None:
-                rc2, out2, err2, _ = _exec(sanitized, env=env_py311)
-                # Keep the retry result, but also surface that a retry happened.
-                out = out2
-                err = f"(retry_uv_py311: {prep_reason})\n{err2}"
-                rc = rc2
+            tail_text = (_tail(out, 20000) + "\n" + _tail(err, 20000)).lower()
+            if sys.version_info >= (3, 13) or ("cp313" in tail_text) or ("python 3.13" in tail_text) or ("py3.13" in tail_text):
+                env_uv, prep_reason, prep_py = _ensure_uv_hint_env()
+                if env_uv is not None:
+                    rc2, out2, err2, _ = _exec(sanitized, env=env_uv)
+                    # Keep the retry result, but also surface that a retry happened.
+                    out = out2
+                    extra = f"{prep_reason}" + (f" python={prep_py}" if prep_py else "")
+                    err = f"(retry_uv_venv: {extra})\n{err2}"
+                    rc = rc2
 
         executed += 1
         dt = time.monotonic() - t0

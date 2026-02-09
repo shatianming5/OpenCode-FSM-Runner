@@ -83,6 +83,26 @@ def test_normalize_hint_command_absolutizes_repo_relative_aider_fsm_python(tmp_p
     assert cmd.startswith(f"{py} -m foo.bar --x 1")
 
 
+def test_normalize_hint_command_rewrites_python_pip_pytest_to_repo_python_when_path() -> None:
+    # 作用：pytest 测试用例：验证行为契约
+    # 能否简略：否
+    # 原因：确保 hints 中不管是 `python ...` 还是 `pip/pytest ...` 都会优先使用 repo venv 的解释器（避免跑到全局 Py3.13 等导致 C 扩展编译失败）
+    # 证据：位置=tests/test_hints_exec.py；类型=function；引用≈1；规模≈20行
+    env = {"AIDER_FSM_PYTHON": "/abs/venv/bin/python"}
+
+    cmd, reason = normalize_hint_command("python -c \"print(1)\"", env=env)
+    assert reason is None
+    assert cmd.startswith("/abs/venv/bin/python -c")
+
+    cmd, reason = normalize_hint_command("pip install foo", env=env)
+    assert reason is None
+    assert cmd.startswith("/abs/venv/bin/python -m pip install")
+
+    cmd, reason = normalize_hint_command("pytest -q", env=env)
+    assert reason is None
+    assert cmd.startswith("/abs/venv/bin/python -m pytest -q")
+
+
 def test_run_hints_runs_docker_hints_in_isolated_artifacts_workdir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -135,6 +155,72 @@ def test_run_hints_runs_docker_hints_in_isolated_artifacts_workdir(
     res = run_hints(repo=repo, max_attempts=1, timeout_seconds=5, env=env)
     assert res.get("ok") is True
     assert seen.get("cwd") == str(artifacts_dir / "hints_workdir" / "attempt_01")
+
+
+def test_run_hints_retries_under_uv_venv_on_py313_build_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 作用：pytest 测试用例：验证行为契约
+    # 能否简略：否
+    # 原因：范化覆盖“C 扩展 wheel build 失败（常见于 Py3.13）-> 自动切 uv venv 用更兼容 Python 重试”路径；并验证多候选版本回退
+    # 证据：位置=tests/test_hints_exec.py；类型=function；引用≈1；规模≈70行
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+
+    env = {
+        "AIDER_FSM_HINTS_JSON": '["pip install greenlet"]',
+        "AIDER_FSM_HINT_UV_PYTHON_CANDIDATES_JSON": '["3.12","3.11"]',
+    }
+
+    monkeypatch.setattr("runner.hints_exec._probe_hint_command", lambda **_kwargs: (True, "ok"))
+    monkeypatch.setattr("runner.hints_exec.shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else "/bin/bash")
+
+    calls = {"bash": 0, "uv": []}
+
+    class _R:
+        # 作用：内部符号：test_run_hints_retries_under_uv_venv_on_py313_build_failure._R
+        # 能否简略：是
+        # 原因：测试替身对象（模拟 subprocess.run 返回值）；规模≈5 行；引用次数≈4（静态近似，可能包含注释/字符串）
+        # 证据：位置=tests/test_hints_exec.py；类型=class；引用≈4；规模≈5行
+        def __init__(self, rc: int, out: str = "", err: str = "") -> None:
+            # 作用：内部符号：test_run_hints_retries_under_uv_venv_on_py313_build_failure._R.__init__
+            # 能否简略：是
+            # 原因：测试代码（优先可读性）；规模≈4 行；引用次数≈1（静态近似，可能包含注释/字符串）
+            # 证据：位置=tests/test_hints_exec.py；类型=method；引用≈1；规模≈4行
+            self.returncode = rc
+            self.stdout = out
+            self.stderr = err
+
+    def fake_run(cmd, *args, **kwargs):  # noqa: ANN001
+        # 作用：内部符号：test_run_hints_retries_under_uv_venv_on_py313_build_failure.fake_run
+        # 能否简略：否
+        # 原因：需要同时模拟 `uv venv` 与 `bash -c ...` 两条路径，并记录 `--python` 选择顺序；规模≈30 行
+        # 证据：位置=tests/test_hints_exec.py；类型=function；引用≈6；规模≈30行
+        if isinstance(cmd, (list, tuple)) and len(cmd) >= 2 and cmd[0] == "uv" and cmd[1] == "venv":
+            py_req = ""
+            try:
+                py_req = str(cmd[cmd.index("--python") + 1])
+            except Exception:
+                py_req = ""
+            calls["uv"].append(py_req)
+            # First candidate fails, second succeeds.
+            if py_req == "3.12":
+                return _R(1, out="", err="uv: requested Python not available")
+            return _R(0, out="ok", err="")
+
+        if isinstance(cmd, (list, tuple)) and cmd[:2] == ["bash", "-c"]:
+            calls["bash"] += 1
+            if calls["bash"] == 1:
+                # Include cp313 marker so the retry path triggers even when tests run under <3.13.
+                return _R(1, out="", err="Failed building wheel for greenlet (cp313) subprocess-exited-with-error")
+            return _R(0, out="ok", err="")
+
+        raise AssertionError(f"unexpected subprocess.run: {cmd!r}")
+
+    monkeypatch.setattr("runner.hints_exec.subprocess.run", fake_run)
+
+    res = run_hints(repo=repo, max_attempts=1, timeout_seconds=5, env=env)
+    assert res.get("ok") is True
+    assert res.get("chosen_command") == "pip install greenlet"
+    assert calls["uv"][:2] == ["3.12", "3.11"]
 
 
 def test_run_hints_runs_openai_codegen_hints_in_isolated_workdir(tmp_path: Path) -> None:
