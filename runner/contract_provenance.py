@@ -7,22 +7,6 @@ from pathlib import Path
 from typing import Any
 
 
-def _file_meta(path: Path) -> dict[str, Any]:
-    # 作用：内部符号：_file_meta
-    # 能否简略：部分
-    # 原因：规模≈10 行；引用次数≈4（静态近似，可能包含注释/字符串）；可通过拆分/去重复/抽 helper 减少复杂度，但不建议完全内联
-    # 证据：位置=runner/contract_provenance.py:11；类型=function；引用≈4；规模≈10行
-    try:
-        data = path.read_bytes()
-    except Exception:
-        return {"exists": False}
-    return {
-        "exists": True,
-        "size": len(data),
-        "sha256": hashlib.sha256(data).hexdigest(),
-    }
-
-
 def snapshot_contract_files(repo: Path) -> dict[str, dict[str, Any]]:
     """Snapshot contract-relevant files for provenance comparison.
 
@@ -37,7 +21,16 @@ def snapshot_contract_files(repo: Path) -> dict[str, dict[str, Any]]:
     # 证据：位置=runner/contract_provenance.py:30；类型=function；引用≈10；规模≈34行
     root = Path(repo).resolve()
     out: dict[str, dict[str, Any]] = {}
-    out["pipeline.yml"] = _file_meta((root / "pipeline.yml").resolve())
+    try:
+        data = (root / "pipeline.yml").resolve().read_bytes()
+    except Exception:
+        out["pipeline.yml"] = {"exists": False}
+    else:
+        out["pipeline.yml"] = {
+            "exists": True,
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
     aider = (root / ".aider_fsm").resolve()
     if aider.exists():
         # Single-file contract inputs/outputs.
@@ -51,7 +44,16 @@ def snapshot_contract_files(repo: Path) -> dict[str, dict[str, Any]]:
         ):
             p = (aider / rel).resolve()
             if p.exists() and p.is_file():
-                out[p.relative_to(root).as_posix()] = _file_meta(p)
+                try:
+                    data = p.read_bytes()
+                except Exception:
+                    out[p.relative_to(root).as_posix()] = {"exists": False}
+                else:
+                    out[p.relative_to(root).as_posix()] = {
+                        "exists": True,
+                        "size": len(data),
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                    }
 
         # Stage scripts are the main contract surface.
         stages = (aider / "stages").resolve()
@@ -59,27 +61,17 @@ def snapshot_contract_files(repo: Path) -> dict[str, dict[str, Any]]:
             for p in sorted(stages.rglob("*")):
                 if not p.is_file():
                     continue
-                out[p.relative_to(root).as_posix()] = _file_meta(p)
+                try:
+                    data = p.read_bytes()
+                except Exception:
+                    out[p.relative_to(root).as_posix()] = {"exists": False}
+                else:
+                    out[p.relative_to(root).as_posix()] = {
+                        "exists": True,
+                        "size": len(data),
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                    }
     return out
-
-
-def _normalize_rel_to_repo(repo: Path, raw_path: str) -> str | None:
-    # 作用：内部符号：_normalize_rel_to_repo
-    # 能否简略：是
-    # 原因：规模≈13 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/contract_provenance.py:59；类型=function；引用≈2；规模≈13行
-    try:
-        p = Path(str(raw_path or "")).expanduser()
-    except Exception:
-        return None
-    if not p.is_absolute():
-        p = (repo / p).resolve()
-    else:
-        p = p.resolve()
-    try:
-        return p.relative_to(repo).as_posix()
-    except Exception:
-        return None
 
 
 def extract_tool_written_paths(*, repo: Path, tool_trace: list[dict[str, Any]] | None) -> set[str]:
@@ -102,28 +94,22 @@ def extract_tool_written_paths(*, repo: Path, tool_trace: list[dict[str, Any]] |
             # OpenCode can write files via either `<write ...>` or `<edit ...>` tool calls.
             if tool not in ("write", "edit") or not ok:
                 continue
-            rel = _normalize_rel_to_repo(root, str(item.get("filePath") or ""))
+            raw_path = str(item.get("filePath") or "")
+            try:
+                p = Path(raw_path).expanduser()
+            except Exception:
+                continue
+            if not p.is_absolute():
+                p = (root / p).resolve()
+            else:
+                p = p.resolve()
+            try:
+                rel = p.relative_to(root).as_posix()
+            except Exception:
+                rel = None
             if rel:
                 writes.add(rel)
     return writes
-
-
-def _status(before: dict[str, Any] | None, after: dict[str, Any] | None) -> str:
-    # 作用：内部符号：_status
-    # 能否简略：是
-    # 原因：规模≈12 行；引用次数≈3（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/contract_provenance.py:96；类型=function；引用≈3；规模≈12行
-    b_exists = bool((before or {}).get("exists"))
-    a_exists = bool((after or {}).get("exists"))
-    if not b_exists and not a_exists:
-        return "absent"
-    if not b_exists and a_exists:
-        return "created"
-    if b_exists and not a_exists:
-        return "deleted"
-    if (before or {}).get("sha256") != (after or {}).get("sha256"):
-        return "modified"
-    return "unchanged"
 
 
 def changed_paths(before: dict[str, dict[str, Any]], after: dict[str, dict[str, Any]]) -> set[str]:
@@ -133,7 +119,21 @@ def changed_paths(before: dict[str, dict[str, Any]], after: dict[str, dict[str, 
     # 证据：位置=runner/contract_provenance.py:110；类型=function；引用≈3；规模≈6行
     out: set[str] = set()
     for rel in set(before.keys()) | set(after.keys()):
-        if _status(before.get(rel), after.get(rel)) != "unchanged":
+        b = before.get(rel)
+        a = after.get(rel)
+        b_exists = bool((b or {}).get("exists"))
+        a_exists = bool((a or {}).get("exists"))
+        if not b_exists and not a_exists:
+            st = "absent"
+        elif not b_exists and a_exists:
+            st = "created"
+        elif b_exists and not a_exists:
+            st = "deleted"
+        elif (b or {}).get("sha256") != (a or {}).get("sha256"):
+            st = "modified"
+        else:
+            st = "unchanged"
+        if st != "unchanged":
             out.add(rel)
     return out
 
@@ -160,7 +160,18 @@ def build_contract_provenance_report(
     for rel in sorted(set(before.keys()) | set(after.keys())):
         b = before.get(rel, {"exists": False})
         a = after.get(rel, {"exists": False})
-        st = _status(b, a)
+        b_exists = bool((b or {}).get("exists"))
+        a_exists = bool((a or {}).get("exists"))
+        if not b_exists and not a_exists:
+            st = "absent"
+        elif not b_exists and a_exists:
+            st = "created"
+        elif b_exists and not a_exists:
+            st = "deleted"
+        elif (b or {}).get("sha256") != (a or {}).get("sha256"):
+            st = "modified"
+        else:
+            st = "unchanged"
         if st == "absent":
             continue
         if st != "unchanged":

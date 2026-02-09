@@ -24,24 +24,6 @@ _FENCE_RE = re.compile(r"```[a-zA-Z0-9_-]*\n(?P<body>.*?)\n```", re.DOTALL)
 _PROMPT_PREFIX_RE = re.compile(r"^(?P<prefix>(?:\$|>>>|\.\.\.)\s+)")
 
 
-def _strip_prompt_prefix(line: str) -> str:
-    """Strip common REPL / shell prompt prefixes in docs (best-effort)."""
-    # 作用：Strip common REPL / shell prompt prefixes in docs (best-effort).
-    # 能否简略：是
-    # 原因：规模≈8 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/contract_hints.py:20；类型=function；引用≈2；规模≈8行
-    s = str(line or "").strip()
-    if not s:
-        return ""
-    if s.startswith("> "):
-        # Markdown quote prefix occasionally appears inside fenced blocks.
-        s = s[2:].lstrip()
-    m = _PROMPT_PREFIX_RE.match(s)
-    if m:
-        s = s[m.end("prefix") :].lstrip()
-    return s
-
-
 _COMMANDISH_FIRST = {
     "bash",
     "sh",
@@ -63,155 +45,6 @@ _COMMANDISH_FIRST = {
     "env",
     "source",
 }
-
-
-def _looks_like_command(line: str) -> bool:
-    """Heuristic filter to avoid treating prose as runnable hints."""
-    # 作用：Heuristic filter to avoid treating prose as runnable hints.
-    # 能否简略：部分
-    # 原因：规模≈28 行；引用次数≈2（静态近似，可能包含注释/字符串）；可通过拆分/去重复/抽 helper 减少复杂度，但不建议完全内联
-    # 证据：位置=runner/contract_hints.py:48；类型=function；引用≈2；规模≈28行
-    s = _strip_prompt_prefix(line)
-    if not s:
-        return False
-    try:
-        parts = shlex.split(s, posix=True)
-    except Exception:
-        parts = [t for t in re.split(r"\s+", s) if t]
-    if not parts:
-        return False
-    first = str(parts[0] or "").strip()
-    if not first:
-        return False
-    if first.startswith(("@", "*", "[", "(", "{")):
-        return False
-    # Reject key/value style lines from BibTeX/YAML/etc (e.g. `title = {...}`).
-    if re.match(r"^[A-Za-z][A-Za-z0-9_]{2,}\\s*=\\s*", s):
-        return False
-    if first.startswith((".", "/")) or "/" in first or first.endswith((".py", ".sh")):
-        return True
-    if first in _COMMANDISH_FIRST:
-        return True
-    # Accept lower-case CLI entrypoints that look like actual binaries/modules
-    # (punctuation helps distinguish from prose like `and`, `completed`, etc).
-    if re.fullmatch(r"[a-z][a-z0-9_.-]{2,}", first) and any(ch in first for ch in "._-"):
-        return True
-    return False
-
-
-def _iter_md_paths(repo: Path, *, max_files: int) -> list[Path]:
-    # 作用：内部符号：_iter_md_paths
-    # 能否简略：是
-    # 原因：规模≈7 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/contract_hints.py:22；类型=function；引用≈2；规模≈7行
-    repo = Path(repo).resolve()
-    md_paths: list[Path] = []
-    for pat in ("README*.md", "docs/**/*.md"):
-        md_paths.extend(sorted(repo.glob(pat)))
-    md_paths = [p for p in md_paths if p.is_file()]
-    return md_paths[: int(max(1, max_files))]
-
-
-def _iter_workflow_paths(repo: Path, *, max_files: int) -> list[Path]:
-    # 作用：内部符号：_iter_workflow_paths
-    # 能否简略：是
-    # 原因：规模≈10 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/contract_hints.py:31；类型=function；引用≈2；规模≈10行
-    repo = Path(repo).resolve()
-    wf_root = (repo / ".github" / "workflows").resolve()
-    if not wf_root.exists():
-        return []
-    paths: list[Path] = []
-    for pat in ("*.yml", "*.yaml"):
-        paths.extend(sorted(wf_root.glob(pat)))
-    paths = [p for p in paths if p.is_file()]
-    return paths[: int(max(1, max_files))]
-
-
-def _yaml_safe_load(text: str) -> Any | None:
-    # 作用：内部符号：_yaml_safe_load
-    # 能否简略：是
-    # 原因：规模≈9 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/contract_hints.py:43；类型=function；引用≈2；规模≈9行
-    try:
-        import yaml  # type: ignore
-    except Exception:
-        return None
-    try:
-        return yaml.safe_load(text)
-    except Exception:
-        return None
-
-
-def _extract_workflow_run_scripts(text: str) -> list[str]:
-    """Extract `run:` scripts from GitHub Actions workflow YAML (best-effort)."""
-    # 作用：Extract `run:` scripts from GitHub Actions workflow YAML (best-effort).
-    # 能否简略：部分
-    # 原因：规模≈26 行；引用次数≈2（静态近似，可能包含注释/字符串）；可通过拆分/去重复/抽 helper 减少复杂度，但不建议完全内联
-    # 证据：位置=runner/contract_hints.py:55；类型=function；引用≈2；规模≈26行
-    data = _yaml_safe_load(text)
-    if not isinstance(data, dict):
-        return []
-    jobs = data.get("jobs")
-    if not isinstance(jobs, dict):
-        return []
-
-    scripts: list[str] = []
-    for _job_id, job in jobs.items():
-        if not isinstance(job, dict):
-            continue
-        steps = job.get("steps")
-        if not isinstance(steps, list):
-            continue
-        for step in steps:
-            if not isinstance(step, dict):
-                continue
-            run = step.get("run")
-            if not isinstance(run, str):
-                continue
-            s = run.strip()
-            if s:
-                scripts.append(s)
-    return scripts
-
-
-def _split_script_lines(script: str) -> list[str]:
-    """Normalize a script block into non-empty lines (keep `\\` continuations)."""
-    # 作用：Normalize a script block into non-empty lines (keep `\` continuations).
-    # 能否简略：是
-    # 原因：规模≈9 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/contract_hints.py:83；类型=function；引用≈2；规模≈9行
-    out: list[str] = []
-    for raw in str(script or "").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        out.append(line)
-    return out
-
-
-def _join_with_continuations(lines: list[str]) -> list[str]:
-    """Join lines that use `\\` continuation into single commands."""
-    # 作用：Join lines that use `\` continuation into single commands.
-    # 能否简略：是
-    # 原因：规模≈18 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/contract_hints.py:94；类型=function；引用≈2；规模≈18行
-    out: list[str] = []
-    cur = ""
-    for line in lines:
-        if cur:
-            if cur.rstrip().endswith("\\"):
-                cur = cur.rstrip()[:-1].rstrip() + " " + line.lstrip()
-                continue
-            out.append(cur)
-            cur = ""
-        # Skip orphan option lines.
-        if line.startswith("-"):
-            continue
-        cur = line
-    if cur:
-        out.append(cur)
-    return out
 
 
 def _extract_workflow_candidates(
@@ -237,7 +70,13 @@ def _extract_workflow_candidates(
     out: list[str] = []
     seen: set[str] = set()
 
-    wf_paths = _iter_workflow_paths(repo, max_files=max_files)
+    wf_root = (repo / ".github" / "workflows").resolve()
+    wf_paths: list[Path] = []
+    if wf_root.exists():
+        for pat in ("*.yml", "*.yaml"):
+            wf_paths.extend(sorted(wf_root.glob(pat)))
+        wf_paths = [p for p in wf_paths if p.is_file()]
+        wf_paths = wf_paths[: int(max(1, max_files))]
     for p in wf_paths:
         if len(out) >= int(max(1, max_candidates)):
             break
@@ -246,14 +85,61 @@ def _extract_workflow_candidates(
         except Exception:
             continue
 
-        scripts = _extract_workflow_run_scripts(text)
+        scripts: list[str] = []
+        try:
+            import yaml  # type: ignore
+        except Exception:
+            continue
+        try:
+            data = yaml.safe_load(text)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        jobs = data.get("jobs")
+        if not isinstance(jobs, dict):
+            continue
+        for _job_id, job in jobs.items():
+            if not isinstance(job, dict):
+                continue
+            steps = job.get("steps")
+            if not isinstance(steps, list):
+                continue
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                run = step.get("run")
+                if not isinstance(run, str):
+                    continue
+                s = run.strip()
+                if s:
+                    scripts.append(s)
         if not scripts:
             continue
 
         step_cmds: list[str] = []
         for s in scripts:
-            lines = _split_script_lines(s)
-            joined = _join_with_continuations(lines)
+            lines: list[str] = []
+            for raw in str(s or "").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                lines.append(line)
+            joined: list[str] = []
+            cur = ""
+            for line in lines:
+                if cur:
+                    if cur.rstrip().endswith("\\"):
+                        cur = cur.rstrip()[:-1].rstrip() + " " + line.lstrip()
+                        continue
+                    joined.append(cur)
+                    cur = ""
+                # Skip orphan option lines.
+                if line.startswith("-"):
+                    continue
+                cur = line
+            if cur:
+                joined.append(cur)
             if len(joined) >= 2:
                 step_cmds.append("\n".join(joined))
             elif joined:
@@ -275,19 +161,6 @@ def _extract_workflow_candidates(
                     break
 
     return out
-
-
-def _tokenize_hint(cmd: str) -> list[str]:
-    # 作用：内部符号：_tokenize_hint
-    # 能否简略：是
-    # 原因：规模≈6 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/contract_hints.py:172；类型=function；引用≈2；规模≈6行
-    cmd2 = _strip_prompt_prefix(cmd)
-    try:
-        return shlex.split(cmd2)
-    except Exception:
-        # Fallback tokenization; good enough for anchors.
-        return [t for t in re.split(r"\s+", str(cmd2 or "").strip()) if t]
 
 
 def _extract_anchors(hints: list[str]) -> list[str]:
@@ -340,7 +213,20 @@ def _extract_anchors(hints: list[str]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for raw in hints or []:
-        tokens = _tokenize_hint(raw)
+        cmd2 = str(raw or "").strip()
+        if not cmd2:
+            continue
+        if cmd2.startswith("> "):
+            # Markdown quote prefix occasionally appears inside fenced blocks.
+            cmd2 = cmd2[2:].lstrip()
+        m = _PROMPT_PREFIX_RE.match(cmd2)
+        if m:
+            cmd2 = cmd2[m.end("prefix") :].lstrip()
+        try:
+            tokens = shlex.split(cmd2)
+        except Exception:
+            # Fallback tokenization; good enough for anchors.
+            tokens = [t for t in re.split(r"\s+", str(cmd2 or "").strip()) if t]
         if not tokens:
             continue
         # Prefer module invocations: `python -m pkg.module ...`
@@ -404,7 +290,12 @@ def suggest_contract_hints(repo: Path, *, max_files: int = 8, max_candidates: in
     # 能否简略：否
     # 原因：规模≈86 行；引用次数≈11（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
     # 证据：位置=runner/contract_hints.py:283；类型=function；引用≈11；规模≈86行
-    md_paths = _iter_md_paths(repo, max_files=max_files)
+    repo = Path(repo).resolve()
+    md_paths: list[Path] = []
+    for pat in ("README*.md", "docs/**/*.md"):
+        md_paths.extend(sorted(repo.glob(pat)))
+    md_paths = [p for p in md_paths if p.is_file()]
+    md_paths = md_paths[: int(max(1, max_files))]
 
     interest_re = re.compile(
         r"(?i)("
@@ -432,7 +323,15 @@ def suggest_contract_hints(repo: Path, *, max_files: int = 8, max_candidates: in
             block_cmds: list[str] = []
             cur = ""
             for raw in body.splitlines():
-                line = _strip_prompt_prefix(raw)
+                line = str(raw or "").strip()
+                if not line:
+                    continue
+                if line.startswith("> "):
+                    # Markdown quote prefix occasionally appears inside fenced blocks.
+                    line = line[2:].lstrip()
+                m2 = _PROMPT_PREFIX_RE.match(line)
+                if m2:
+                    line = line[m2.end("prefix") :].lstrip()
                 if not line or line.startswith("#"):
                     continue
                 low = line.lower()
@@ -455,14 +354,48 @@ def suggest_contract_hints(repo: Path, *, max_files: int = 8, max_candidates: in
                 block_cmds.append(cur)
 
             for cmd in block_cmds:
-                if not _looks_like_command(cmd):
+                s = str(cmd or "").strip()
+                if not s:
                     continue
-                if not interest_re.search(cmd):
+                if s.startswith("> "):
+                    # Markdown quote prefix occasionally appears inside fenced blocks.
+                    s = s[2:].lstrip()
+                m3 = _PROMPT_PREFIX_RE.match(s)
+                if m3:
+                    s = s[m3.end("prefix") :].lstrip()
+                if not s:
                     continue
-                if cmd in seen:
+                try:
+                    parts = shlex.split(s, posix=True)
+                except Exception:
+                    parts = [t for t in re.split(r"\s+", s) if t]
+                if not parts:
                     continue
-                seen.add(cmd)
-                candidates.append(cmd)
+                first = str(parts[0] or "").strip()
+                if not first:
+                    continue
+                if first.startswith(("@", "*", "[", "(", "{")):
+                    continue
+                # Reject key/value style lines from BibTeX/YAML/etc (e.g. `title = {...}`).
+                if re.match(r"^[A-Za-z][A-Za-z0-9_]{2,}\\s*=\\s*", s):
+                    continue
+                if not (
+                    first.startswith((".", "/"))
+                    or "/" in first
+                    or first.endswith((".py", ".sh"))
+                    or first in _COMMANDISH_FIRST
+                    or (
+                        re.fullmatch(r"[a-z][a-z0-9_.-]{2,}", first)
+                        and any(ch in first for ch in "._-")
+                    )
+                ):
+                    continue
+                if not interest_re.search(s):
+                    continue
+                if s in seen:
+                    continue
+                seen.add(s)
+                candidates.append(s)
                 if len(candidates) >= int(max(1, max_candidates)):
                     anchors = _extract_anchors(candidates)
                     return ContractHints(commands=candidates, anchors=anchors)
@@ -470,7 +403,7 @@ def suggest_contract_hints(repo: Path, *, max_files: int = 8, max_candidates: in
     # Fall back to CI workflow hints when README/docs are insufficient.
     if len(candidates) < int(max(1, max_candidates)):
         wf_candidates = _extract_workflow_candidates(
-            Path(repo),
+            repo,
             interest_re=interest_re,
             max_files=max_files,
             max_candidates=int(max(0, int(max_candidates) - len(candidates))),

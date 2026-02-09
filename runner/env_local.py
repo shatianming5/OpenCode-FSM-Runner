@@ -427,7 +427,7 @@ def open_env(
                         pipeline=parsed,
                         require_metrics=bool(scaffold_require_metrics),
                     )
-                    if report.ok:
+                    if not report.errors:
                         pipeline_ok = True
                         if report.warnings:
                             write_text(
@@ -491,7 +491,7 @@ def open_env(
                 pipeline=parsed,
                 require_metrics=bool(scaffold_require_metrics),
             )
-            if not report.ok:
+            if report.errors:
                 _write_scaffold_provenance()
                 write_text(
                     out_dir / "scaffold_error.txt",

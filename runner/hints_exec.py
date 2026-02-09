@@ -18,40 +18,6 @@ from .security import cmd_allowed
 from ._util import _is_truthy, _parse_json_str_list
 
 
-def _read_hints_file(path: Path) -> list[str]:
-    # 作用：内部符号：_read_hints_file
-    # 能否简略：是
-    # 原因：规模≈12 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/hints_exec.py:38；类型=function；引用≈2；规模≈12行
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return []
-    out: list[str] = []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        out.append(line)
-    return out
-
-
-def _find_latest_scaffold_hints_file(repo: Path) -> Path | None:
-    # 作用：内部符号：_find_latest_scaffold_hints_file
-    # 能否简略：是
-    # 原因：规模≈10 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/hints_exec.py:52；类型=function；引用≈2；规模≈10行
-    repo = Path(repo).resolve()
-    root = (repo / ".aider_fsm" / "artifacts").resolve()
-    if not root.exists():
-        return None
-    candidates = list(root.glob("*/scaffold/scaffold_command_hints.txt"))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
-    return candidates[0]
-
-
 _FLAG_VALUE_RE = re.compile(r"(?P<flag>--[A-Za-z0-9_.-]+)\s+(?P<val>(?:\"[^\"]*\"|'[^']*'|\S+))")
 
 
@@ -439,23 +405,6 @@ def _is_remote_openai_hint(cmd: str) -> bool:
     return _hint_backend(cmd) == "openai"
 
 
-def _contains_openai_auth_error(text: str) -> bool:
-    # 作用：内部符号：_contains_openai_auth_error
-    # 能否简略：是
-    # 原因：规模≈11 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/hints_exec.py:201；类型=function；引用≈2；规模≈11行
-    low = str(text or "").lower()
-    needles = (
-        "invalid_api_key",
-        "incorrect api key provided",
-        "authenticationerror",
-        "error code: 401",
-        "status': 401",
-        "status: 401",
-    )
-    return any(n in low for n in needles)
-
-
 _SCORE_TOKEN_RE = re.compile(
     r"(?i)\b(?P<key>pass@1\+?|accuracy|score)\b[^0-9%]{0,12}(?P<val>\d+(?:\.\d+)?)(?P<pct>\s*%)?"
 )
@@ -538,18 +487,6 @@ def _extract_score_from_json_obj(obj: object) -> tuple[float | None, str]:
                 if norm is not None:
                     return norm, f"json:{needle}"
     return None, "no_score_in_json"
-
-
-def _extract_score_from_json_file(path: Path) -> tuple[float | None, str]:
-    # 作用：内部符号：_extract_score_from_json_file
-    # 能否简略：是
-    # 原因：规模≈6 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/hints_exec.py:282；类型=function；引用≈2；规模≈6行
-    try:
-        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except Exception as e:
-        return None, f"metrics_json_parse_failed:{e}"
-    return _extract_score_from_json_obj(data)
 
 
 def _candidate_metrics_paths(cmd: str, *, repo: Path, workdir: Path | None = None) -> list[Path]:
@@ -723,27 +660,30 @@ def normalize_hint_command(cmd: str, *, env: dict[str, str]) -> tuple[str, str |
         except Exception:
             pass
 
-    def _rewrite_line(line: str) -> str:
-        # 作用：内部符号：normalize_hint_command._rewrite_line
-        # 能否简略：是
-        # 原因：规模≈15 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-        # 证据：位置=runner/hints_exec.py:421；类型=function；引用≈2；规模≈15行
+    rewritten: list[str] = []
+    for line in s2.splitlines():
+        line = line.strip()
+        if not line:
+            continue
         try:
             parts = shlex.split(line, posix=True)
         except Exception:
-            return line
+            rewritten.append(line)
+            continue
         if not parts:
-            return line
+            rewritten.append(line)
+            continue
         first = str(parts[0] or "").strip()
         if not first or "/" in first or first.startswith((".", "~")):
-            return line
+            rewritten.append(line)
+            continue
         if _DOTTED_MODULE_RE.fullmatch(first) and shutil.which(first) is None:
             rest = " ".join(shlex.quote(str(p)) for p in parts[1:])
             base = f"{shlex.quote(py)} -m {shlex.quote(first)}"
-            return f"{base} {rest}".strip() if rest else base
-        return line
-
-    s2 = "\n".join([_rewrite_line(line) for line in s2.splitlines() if line.strip()]).strip()
+            rewritten.append(f"{base} {rest}".strip() if rest else base)
+        else:
+            rewritten.append(line)
+    s2 = "\n".join(rewritten).strip()
 
     py_is_path = ("/" in py) or py.startswith((".", "~"))
 
@@ -766,26 +706,6 @@ def normalize_hint_command(cmd: str, *, env: dict[str, str]) -> tuple[str, str |
         if not parts:
             return line
 
-        def _is_py(tok: str) -> bool:
-            # 作用：内部符号：normalize_hint_command._maybe_rewrite_python_tools._is_py
-            # 能否简略：是
-            # 原因：小型谓词；集中处理 python/python3/python3.11 等模式；规模≈7 行
-            # 证据：位置=runner/hints_exec.py；类型=function；引用≈2；规模≈7行
-            t = str(tok or "").strip()
-            if t in ("python", "python3"):
-                return True
-            return bool(re.fullmatch(r"python\\d+(?:\\.\\d+)?", t))
-
-        def _is_pip(tok: str) -> bool:
-            # 作用：内部符号：normalize_hint_command._maybe_rewrite_python_tools._is_pip
-            # 能否简略：是
-            # 原因：小型谓词；集中处理 pip/pip3/pip3.11 等模式；规模≈7 行
-            # 证据：位置=runner/hints_exec.py；类型=function；引用≈2；规模≈7行
-            t = str(tok or "").strip()
-            if t in ("pip", "pip3"):
-                return True
-            return bool(re.fullmatch(r"pip\\d+(?:\\.\\d+)?", t))
-
         prefix: list[str] = []
         i = 0
         while i < len(parts) and _ENV_ASSIGN_RE.match(str(parts[i] or "").strip()):
@@ -803,9 +723,13 @@ def normalize_hint_command(cmd: str, *, env: dict[str, str]) -> tuple[str, str |
         cmd0 = str(parts[i] or "")
         rest = [str(x or "") for x in parts[i + 1 :]]
 
-        if cmd0 != py and _is_py(cmd0):
+        tok = cmd0.strip()
+        is_py = tok in ("python", "python3") or bool(re.fullmatch(r"python\\d+(?:\\.\\d+)?", tok))
+        is_pip = tok in ("pip", "pip3") or bool(re.fullmatch(r"pip\\d+(?:\\.\\d+)?", tok))
+
+        if cmd0 != py and is_py:
             cmd0 = py
-        elif _is_pip(cmd0):
+        elif is_pip:
             cmd0 = py
             rest = ["-m", "pip"] + rest
         elif cmd0 == "pytest":
@@ -1220,9 +1144,24 @@ def run_hints(
 
     raw_hints = _parse_json_str_list(env2.get("AIDER_FSM_HINTS_JSON"))
     if not raw_hints:
-        hints_file = _find_latest_scaffold_hints_file(repo)
+        hints_file: Path | None = None
+        artifacts_root = (repo / ".aider_fsm" / "artifacts").resolve()
+        if artifacts_root.exists():
+            candidates = list(artifacts_root.glob("*/scaffold/scaffold_command_hints.txt"))
+            if candidates:
+                candidates.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+                hints_file = candidates[0]
         if hints_file is not None:
-            raw_hints = _read_hints_file(hints_file)
+            try:
+                text = hints_file.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                text = ""
+            raw_hints = []
+            for raw in text.splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                raw_hints.append(line)
 
     anchors = _parse_json_str_list(env2.get("AIDER_FSM_HINT_ANCHORS_JSON"))
     used_anchors: list[str] = []
@@ -1251,24 +1190,6 @@ def run_hints(
 
     uv_hint_env: dict[str, str] | None = None
     uv_hint_env_py: str = ""
-
-    def _looks_like_py_incompat_build_failure(text: str) -> bool:
-        # 作用：内部符号：run_hints._looks_like_py_incompat_build_failure
-        # 能否简略：部分
-        # 原因：启发式判断编译/轮子构建失败（常见于 Py3.13 C 扩展）；用于触发一次性回退重试
-        # 证据：位置=runner/hints_exec.py；类型=function；引用≈1；规模≈15行
-        low = str(text or "").lower()
-        if not low:
-            return False
-        if "greenlet" in low and ("cframe" in low or "_pycframe" in low or "failed to build" in low):
-            return True
-        if "failed building wheel for" in low or "could not build wheels for" in low:
-            return True
-        if "subprocess-exited-with-error" in low and ("error:" in low or "failed" in low):
-            return True
-        if "failed to build installable wheels" in low and ("pyproject.toml" in low or "greenlet" in low):
-            return True
-        return False
 
     def _ensure_uv_hint_env() -> tuple[dict[str, str] | None, str, str]:
         # 作用：内部符号：run_hints._ensure_uv_hint_env
@@ -1415,26 +1336,6 @@ def run_hints(
         if (".evaluate" not in low) and (".codegen" not in low):
             return False
         return True
-
-    def _hint_workdir(cmd: str, *, attempt_no: int) -> Path:
-        # 作用：内部符号：run_hints._hint_workdir
-        # 能否简略：是
-        # 原因：规模≈15 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-        # 证据：位置=runner/hints_exec.py:842；类型=function；引用≈2；规模≈15行
-        nonlocal hint_work_root
-        # Default: run hints from repo root.
-        if artifacts_dir is None:
-            return repo
-        # Use isolated workdirs for docker hints so any container-created output dirs
-        # (often owned by root) do not contaminate the repo or break subsequent hints.
-        if _DOCKER_LINE_RE.search(cmd) or _looks_like_openai_codegen_eval(cmd):
-            if hint_work_root is None:
-                hint_work_root = (artifacts_dir / "hints_workdir").resolve()
-                hint_work_root.mkdir(parents=True, exist_ok=True)
-            wd = (hint_work_root / f"attempt_{attempt_no:02d}").resolve()
-            wd.mkdir(parents=True, exist_ok=True)
-            return wd
-        return repo
 
     def _maybe_prepare_dataset_override(cmd: str, *, workdir: Path, env: dict[str, str]) -> dict[str, str]:
         """Best-effort: create a small dataset override file for smoke/full-lite runs.
@@ -1721,34 +1622,13 @@ if len(seen) <= 0:
             }
         )
 
-    def _probe_rank(v: bool | None) -> int:
-        # 作用：内部符号：run_hints._probe_rank
-        # 能否简略：是
-        # 原因：规模≈6 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-        # 证据：位置=runner/hints_exec.py:1120；类型=function；引用≈2；规模≈6行
-        if v is True:
-            return 2
-        if v is None:
-            return 1
-        return 0
-
-    candidates.sort(key=lambda x: (_probe_rank(x.get("probe_ok")), int(x.get("priority") or 0)), reverse=True)
-
-    def _hint_kind(sanitized: str) -> str:
-        # 作用：内部符号：run_hints._hint_kind
-        # 能否简略：是
-        # 原因：规模≈11 行；引用次数≈1（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-        # 证据：位置=runner/hints_exec.py:1132；类型=function；引用≈1；规模≈11行
-        low = str(sanitized or "").lower()
-        if "pytest" in low:
-            return "pytest"
-        if "pip install" in low or "poetry install" in low or "conda install" in low:
-            return "install"
-        if low.lstrip().startswith("docker "):
-            return "docker"
-        if low.lstrip().startswith("git "):
-            return "git"
-        return "other"
+    candidates.sort(
+        key=lambda x: (
+            (2 if x.get("probe_ok") is True else 1 if x.get("probe_ok") is None else 0),
+            int(x.get("priority") or 0),
+        ),
+        reverse=True,
+    )
 
     # Prefer a diverse first-attempt set so we don't burn the whole attempt budget
     # on a single category (e.g. many pytest hints failing for missing deps) while
@@ -1759,7 +1639,15 @@ if len(seen) <= 0:
         for i, cand in enumerate(candidates):
             if i in picked:
                 continue
-            if _hint_kind(str(cand.get("sanitized") or "")) == want:
+            low = str(cand.get("sanitized") or "").lower()
+            match = False
+            if want == "pytest":
+                match = "pytest" in low
+            elif want == "install":
+                match = ("pip install" in low) or ("poetry install" in low) or ("conda install" in low)
+            elif want == "docker":
+                match = low.lstrip().startswith("docker ")
+            if match:
                 ordered.append(cand)
                 picked.add(i)
                 break
@@ -1810,7 +1698,17 @@ if len(seen) <= 0:
             )
             continue
 
-        workdir = _hint_workdir(sanitized, attempt_no=int(executed) + 1)
+        attempt_no = int(executed) + 1
+        if artifacts_dir is None:
+            workdir = repo
+        elif _DOCKER_LINE_RE.search(sanitized) or _looks_like_openai_codegen_eval(sanitized):
+            if hint_work_root is None:
+                hint_work_root = (artifacts_dir / "hints_workdir").resolve()
+                hint_work_root.mkdir(parents=True, exist_ok=True)
+            workdir = (hint_work_root / f"attempt_{attempt_no:02d}").resolve()
+            workdir.mkdir(parents=True, exist_ok=True)
+        else:
+            workdir = repo
         metrics_paths = _candidate_metrics_paths(sanitized, repo=repo, workdir=workdir if workdir != repo else None)
         if require_real_score:
             metrics_paths.append((repo / ".aider_fsm" / "metrics.json").resolve())
@@ -1876,22 +1774,33 @@ if len(seen) <= 0:
 
         # If we see a Python/C-extension build failure (common on Py3.13), retry once
         # inside a uv-managed venv with a more compatible Python.
-        if (
-            rc != 0
-            and not this_timed_out
-            and auto_uv_venv
-            and _looks_like_py_incompat_build_failure((_tail(out, 20000) + "\n" + _tail(err, 20000)))
-        ):
+        if rc != 0 and not this_timed_out and auto_uv_venv:
             tail_text = (_tail(out, 20000) + "\n" + _tail(err, 20000)).lower()
-            if sys.version_info >= (3, 13) or ("cp313" in tail_text) or ("python 3.13" in tail_text) or ("py3.13" in tail_text):
-                env_uv, prep_reason, prep_py = _ensure_uv_hint_env()
-                if env_uv is not None:
-                    rc2, out2, err2, _ = _exec(sanitized, env=env_uv)
-                    # Keep the retry result, but also surface that a retry happened.
-                    out = out2
-                    extra = f"{prep_reason}" + (f" python={prep_py}" if prep_py else "")
-                    err = f"(retry_uv_venv: {extra})\n{err2}"
-                    rc = rc2
+            looks_incompat = False
+            if tail_text:
+                if "greenlet" in tail_text and (
+                    ("cframe" in tail_text) or ("_pycframe" in tail_text) or ("failed to build" in tail_text)
+                ):
+                    looks_incompat = True
+                elif ("failed building wheel for" in tail_text) or ("could not build wheels for" in tail_text):
+                    looks_incompat = True
+                elif ("subprocess-exited-with-error" in tail_text) and (("error:" in tail_text) or ("failed" in tail_text)):
+                    looks_incompat = True
+                elif ("failed to build installable wheels" in tail_text) and (
+                    ("pyproject.toml" in tail_text) or ("greenlet" in tail_text)
+                ):
+                    looks_incompat = True
+
+            if looks_incompat:
+                if sys.version_info >= (3, 13) or ("cp313" in tail_text) or ("python 3.13" in tail_text) or ("py3.13" in tail_text):
+                    env_uv, prep_reason, prep_py = _ensure_uv_hint_env()
+                    if env_uv is not None:
+                        rc2, out2, err2, _ = _exec(sanitized, env=env_uv)
+                        # Keep the retry result, but also surface that a retry happened.
+                        out = out2
+                        extra = f"{prep_reason}" + (f" python={prep_py}" if prep_py else "")
+                        err = f"(retry_uv_venv: {extra})\n{err2}"
+                        rc = rc2
 
         executed += 1
         dt = time.monotonic() - t0
@@ -1935,7 +1844,12 @@ if len(seen) <= 0:
                             continue
                     except Exception:
                         continue
-                    val, src = _extract_score_from_json_file(p)
+                    try:
+                        data = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+                    except Exception as e:
+                        val, src = None, f"metrics_json_parse_failed:{e}"
+                    else:
+                        val, src = _extract_score_from_json_obj(data)
                     if val is not None:
                         extracted = float(val)
                         source = f"file:{p.name}:{src}"
@@ -1984,7 +1898,16 @@ if len(seen) <= 0:
                 break
 
         if _is_remote_openai_hint(sanitized):
-            if _contains_openai_auth_error((_tail(out, 12000) + "\n" + _tail(err, 12000))):
+            low = (_tail(out, 12000) + "\n" + _tail(err, 12000)).lower()
+            needles = (
+                "invalid_api_key",
+                "incorrect api key provided",
+                "authenticationerror",
+                "error code: 401",
+                "status': 401",
+                "status: 401",
+            )
+            if any(n in low for n in needles):
                 openai_auth_failed = True
 
     if not ok:

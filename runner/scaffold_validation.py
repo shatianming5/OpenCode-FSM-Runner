@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .bootstrap import load_bootstrap_spec_with_diagnostics
@@ -19,27 +19,11 @@ class ScaffoldValidationReport:
     # 原因：规模≈33 行；引用次数≈3（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
     # 证据：位置=runner/scaffold_validation.py:17；类型=class；引用≈3；规模≈33行
 
-    missing_fields: list[str] = None  # type: ignore[assignment]
-    missing_files: list[str] = None  # type: ignore[assignment]
-    stage_script_errors: list[str] = None  # type: ignore[assignment]
-    bootstrap_errors: list[str] = None  # type: ignore[assignment]
-    warnings: list[str] = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        # 作用：内部符号：ScaffoldValidationReport.__post_init__
-        # 能否简略：是
-        # 原因：规模≈11 行；引用次数≈0（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-        # 证据：位置=runner/scaffold_validation.py:25；类型=method；引用≈0；规模≈11行
-        if self.missing_fields is None:
-            object.__setattr__(self, "missing_fields", [])
-        if self.missing_files is None:
-            object.__setattr__(self, "missing_files", [])
-        if self.stage_script_errors is None:
-            object.__setattr__(self, "stage_script_errors", [])
-        if self.bootstrap_errors is None:
-            object.__setattr__(self, "bootstrap_errors", [])
-        if self.warnings is None:
-            object.__setattr__(self, "warnings", [])
+    missing_fields: list[str] = field(default_factory=list)
+    missing_files: list[str] = field(default_factory=list)
+    stage_script_errors: list[str] = field(default_factory=list)
+    bootstrap_errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def errors(self) -> list[str]:
@@ -53,15 +37,6 @@ class ScaffoldValidationReport:
             *[f"stage_script_error: {x}" for x in (self.stage_script_errors or [])],
             *[f"bootstrap_error: {x}" for x in (self.bootstrap_errors or [])],
         ]
-
-    @property
-    def ok(self) -> bool:
-        # 作用：内部符号：ScaffoldValidationReport.ok
-        # 能否简略：是
-        # 原因：规模≈2 行；引用次数≈0（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-        # 证据：位置=runner/scaffold_validation.py:47；类型=method；引用≈0；规模≈2行
-        return len(self.errors) == 0
-
 
 _BOOTSTRAP_STAGE_CMD_RE = re.compile(
     r"(?i)(^|\s)(pytest|nose2?|tox|make\s+test|runner\.generic_evaluation|"

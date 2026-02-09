@@ -54,7 +54,7 @@ def test_validate_scaffold_contract_reports_stage_script_syntax_errors(tmp_path:
     )
 
     report = validate_scaffold_contract(repo, pipeline=_minimal_pipeline(), require_metrics=True)
-    assert report.ok is False
+    assert report.errors
     assert report.stage_script_errors
     assert any("evaluation.sh" in x for x in report.stage_script_errors)
 
@@ -69,5 +69,5 @@ def test_validate_scaffold_contract_reports_bootstrap_parse_error(tmp_path: Path
     _write(repo / ".aider_fsm" / "bootstrap.yml", "version: [\n")
 
     report = validate_scaffold_contract(repo, pipeline=_minimal_pipeline(), require_metrics=True)
-    assert report.ok is False
+    assert report.errors
     assert report.bootstrap_errors

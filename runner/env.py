@@ -34,14 +34,6 @@ from .env_local import (
 __all__ = ["EnvSession", "setup"]
 
 
-def _now_run_id() -> str:
-    # 作用：内部符号：_now_run_id
-    # 能否简略：是
-    # 原因：规模≈2 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/env.py:37；类型=function；引用≈2；规模≈2行
-    return time.strftime("%Y%m%d_%H%M%S", time.localtime())
-
-
 def _resolve_path(p: str | Path) -> Path:
     # 作用：内部符号：_resolve_path
     # 能否简略：部分
@@ -153,26 +145,6 @@ def _runtime_openai_config(runtime_env_path: Path) -> tuple[str | None, str | No
 
     base_v1 = _ensure_openai_v1_base(base) if base else ""
     return (base_v1 or None), (model or None)
-
-
-def _verification_errors_summary(verify: Any) -> str:
-    """Best-effort: surface pipeline verification errors for contract repair prompts."""
-    # 作用：Best-effort: surface pipeline verification errors for contract repair prompts.
-    # 能否简略：是
-    # 原因：规模≈14 行；引用次数≈3（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/env.py:152；类型=function；引用≈3；规模≈14行
-    if verify is None:
-        return ""
-    parts: list[str] = []
-    failed_stage = getattr(verify, "failed_stage", None)
-    if isinstance(failed_stage, str) and failed_stage.strip():
-        parts.append(f"verify.failed_stage: {failed_stage.strip()}")
-    metrics_errors = getattr(verify, "metrics_errors", None)
-    if isinstance(metrics_errors, list):
-        cleaned = [str(x).strip() for x in metrics_errors if str(x).strip()]
-        if cleaned:
-            parts.append("verify.metrics_errors:\n" + "\n".join([f"- {x}" for x in cleaned]))
-    return "\n".join(parts).strip()
 
 
 def _hf_parquet_qa_rows(repo_root: Path) -> int | None:
@@ -466,16 +438,6 @@ class EnvSession:
             return "on"
         return m
 
-    def _set_llm(self, llm: str | Path) -> None:
-        # 作用：内部符号：EnvSession._set_llm
-        # 能否简略：是
-        # 原因：规模≈5 行；引用次数≈1（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-        # 证据：位置=runner/env.py:451；类型=method；引用≈1；规模≈5行
-        kind, model_dir, model = _resolve_llm(llm)
-        self.llm_kind = kind
-        self.trained_model_dir = model_dir
-        self.llm_model = model
-
     def _apply_llm_overrides(self, overrides: dict[str, str]) -> None:
         """Force a consistent LLM contract into env vars (no hardcoded paths/endpoints)."""
         # 作用：Force a consistent LLM contract into env vars (no hardcoded paths/endpoints).
@@ -555,21 +517,6 @@ class EnvSession:
         if self.llm_kind == "local_hf":
             overrides.setdefault("OPENAI_API_KEY", str(overrides.get("OPENAI_API_KEY") or "local"))
 
-    def _maybe_teardown(self, *, run_root: Path, overrides: dict[str, str]) -> None:
-        # 作用：内部符号：EnvSession._maybe_teardown
-        # 能否简略：是
-        # 原因：规模≈10 行；引用次数≈3（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-        # 证据：位置=runner/env.py:524；类型=method；引用≈3；规模≈10行
-        try:
-            _deploy_teardown(
-                self.env,
-                artifacts_dir=(run_root / "deploy_teardown"),
-                env_overrides=overrides,
-                unattended=str(self.unattended or "strict"),
-            )
-        except Exception:
-            pass
-
     def rollout(
         self,
         llm: str | Path,
@@ -584,7 +531,10 @@ class EnvSession:
         # 能否简略：否
         # 原因：公共 API/关键编排点；规模≈117 行；引用次数≈3（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
         # 证据：位置=runner/env.py:544；类型=method；引用≈3；规模≈117行
-        self._set_llm(llm)
+        kind, model_dir, model = _resolve_llm(llm)
+        self.llm_kind = kind
+        self.trained_model_dir = model_dir
+        self.llm_model = model
 
         run_root = _resolve_run_root(self.env.repo, run_id=self.run_id, artifacts_dir=artifacts_dir)
 
@@ -669,7 +619,15 @@ class EnvSession:
             if attempt >= int(max(0, repair_iters)):
                 return rollout_res
 
-            self._maybe_teardown(run_root=run_root / f"teardown_attempt_{attempt+1:02d}", overrides=overrides)
+            try:
+                _deploy_teardown(
+                    self.env,
+                    artifacts_dir=(run_root / f"teardown_attempt_{attempt+1:02d}" / "deploy_teardown"),
+                    env_overrides=overrides,
+                    unattended=str(self.unattended or "strict"),
+                )
+            except Exception:
+                pass
             repair_contract(
                 repo=self.env.repo,
                 model=str(self.opencode_repair_model or self.opencode_model or "").strip(),
@@ -730,7 +688,18 @@ class EnvSession:
                     run_bootstrap_first=True,
                 )
                 if not eval_res.ok:
-                    combined = _verification_errors_summary(eval_res.verify)
+                    verify = eval_res.verify
+                    if verify is not None:
+                        parts: list[str] = []
+                        failed_stage = getattr(verify, "failed_stage", None)
+                        if isinstance(failed_stage, str) and failed_stage.strip():
+                            parts.append(f"verify.failed_stage: {failed_stage.strip()}")
+                        metrics_errors = getattr(verify, "metrics_errors", None)
+                        if isinstance(metrics_errors, list):
+                            cleaned = [str(x).strip() for x in metrics_errors if str(x).strip()]
+                            if cleaned:
+                                parts.append("verify.metrics_errors:\n" + "\n".join([f"- {x}" for x in cleaned]))
+                        combined = "\n".join(parts).strip()
                 if eval_res.ok:
                     if bool(self.require_metrics) and isinstance(eval_res.metrics, dict) and eval_res.metrics.get("ok") is not True:
                         combined = "metrics.ok_not_true"
@@ -807,7 +776,18 @@ class EnvSession:
                     run_bootstrap_first=True,
                 )
                 if not eval_res.ok:
-                    combined = _verification_errors_summary(eval_res.verify)
+                    verify = eval_res.verify
+                    if verify is not None:
+                        parts: list[str] = []
+                        failed_stage = getattr(verify, "failed_stage", None)
+                        if isinstance(failed_stage, str) and failed_stage.strip():
+                            parts.append(f"verify.failed_stage: {failed_stage.strip()}")
+                        metrics_errors = getattr(verify, "metrics_errors", None)
+                        if isinstance(metrics_errors, list):
+                            cleaned = [str(x).strip() for x in metrics_errors if str(x).strip()]
+                            if cleaned:
+                                parts.append("verify.metrics_errors:\n" + "\n".join([f"- {x}" for x in cleaned]))
+                        combined = "\n".join(parts).strip()
                 if eval_res.ok:
                     if bool(self.require_metrics) and isinstance(eval_res.metrics, dict) and eval_res.metrics.get("ok") is not True:
                         combined = "metrics.ok_not_true"
@@ -838,7 +818,15 @@ class EnvSession:
             if attempt >= int(max(0, repair_iters)):
                 return eval_res
 
-            self._maybe_teardown(run_root=run_root / f"teardown_attempt_{attempt+1:02d}", overrides=overrides)
+            try:
+                _deploy_teardown(
+                    self.env,
+                    artifacts_dir=(run_root / f"teardown_attempt_{attempt+1:02d}" / "deploy_teardown"),
+                    env_overrides=overrides,
+                    unattended=str(self.unattended or "strict"),
+                )
+            except Exception:
+                pass
             repair_contract(
                 repo=self.env.repo,
                 model=str(self.opencode_repair_model or self.opencode_model or "").strip(),
@@ -875,7 +863,10 @@ class EnvSession:
         # 原因：公共 API/关键编排点；规模≈20 行；引用次数≈4（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
         # 证据：位置=runner/env.py:825；类型=method；引用≈4；规模≈20行
         if llm is not None:
-            self._set_llm(llm)
+            kind, model_dir, model = _resolve_llm(llm)
+            self.llm_kind = kind
+            self.trained_model_dir = model_dir
+            self.llm_model = model
 
         run_root = _resolve_run_root(self.env.repo, run_id=self.run_id, artifacts_dir=artifacts_dir)
         try:
@@ -888,7 +879,15 @@ class EnvSession:
             return res
         finally:
             overrides = self._base_overrides(mode=mode, extra=env_overrides)
-            self._maybe_teardown(run_root=run_root / "final_teardown", overrides=overrides)
+            try:
+                _deploy_teardown(
+                    self.env,
+                    artifacts_dir=(run_root / "final_teardown" / "deploy_teardown"),
+                    env_overrides=overrides,
+                    unattended=str(self.unattended or "strict"),
+                )
+            except Exception:
+                pass
 
 
 def setup(
@@ -962,7 +961,7 @@ def setup(
     hints = suggest_contract_hints(env_handle.repo)
     session = EnvSession(
         env=env_handle,
-        run_id=_now_run_id(),
+        run_id=time.strftime("%Y%m%d_%H%M%S", time.localtime()),
         unattended=str(unattended or "strict"),
         opencode_model=str(opencode_model or ""),
         opencode_repair_model=str(opencode_repair_model or opencode_model or ""),

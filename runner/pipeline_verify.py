@@ -84,101 +84,6 @@ def _read_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     return data, None
 
 
-def _validate_metrics(metrics: dict[str, Any], required_keys: list[str]) -> list[str]:
-    """中文说明：
-    - 含义：校验 metrics dict 是否包含 required_keys。
-    - 内容：返回缺失 key 列表；为空表示通过。
-    - 可简略：可能（非常小的 helper；但逻辑集中更清晰）。
-    """
-    # 作用：中文说明：
-    # 能否简略：是
-    # 原因：规模≈11 行；引用次数≈3（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/pipeline_verify.py:80；类型=function；引用≈3；规模≈11行
-    missing: list[str] = []
-    for k in required_keys:
-        if k not in metrics:
-            missing.append(k)
-    return missing
-
-
-def _validate_hints_used(repo: Path, *, expected_anchors: list[str]) -> tuple[bool, str]:
-    """Validate `.aider_fsm/hints_used.json` when hint execution is required."""
-    # 作用：Validate `.aider_fsm/hints_used.json` when hint execution is required.
-    # 能否简略：部分
-    # 原因：规模≈31 行；引用次数≈2（静态近似，可能包含注释/字符串）；可通过拆分/去重复/抽 helper 减少复杂度，但不建议完全内联
-    # 证据：位置=runner/pipeline_verify.py:113；类型=function；引用≈2；规模≈31行
-    repo = Path(repo).resolve()
-    path = (repo / ".aider_fsm" / "hints_used.json").resolve()
-    if not path.exists():
-        return False, f"missing_hints_used_json: {path}"
-    data, err = _read_json(path)
-    if err:
-        return False, f"hints_used_json_{err}"
-    assert isinstance(data, dict)  # _read_json guarantees dict on success
-    if data.get("ok") is not True:
-        return False, "hints_used.ok_not_true"
-
-    used = data.get("used_anchors")
-    if not isinstance(used, list) or not used:
-        return False, "hints_used.used_anchors_missing_or_empty"
-    used_clean = [str(x).strip() for x in used if isinstance(x, str) and str(x).strip()]
-    if not used_clean:
-        return False, "hints_used.used_anchors_invalid"
-
-    exp = [str(x).strip() for x in (expected_anchors or []) if str(x).strip()]
-    if exp:
-        if not any(u in exp for u in used_clean):
-            return False, "hints_used.no_expected_anchor"
-
-    commands = data.get("commands")
-    if commands is not None:
-        if not isinstance(commands, list) or not any(isinstance(x, str) and x.strip() for x in commands):
-            return False, "hints_used.commands_invalid"
-
-    return True, "ok"
-
-
-def _validate_hints_run(repo: Path) -> tuple[bool, str]:
-    """Validate `.aider_fsm/hints_run.json` when a real (parseable) score is required."""
-    # 作用：Validate `.aider_fsm/hints_run.json` when a real (parseable) score is required.
-    # 能否简略：部分
-    # 原因：规模≈35 行；引用次数≈2（静态近似，可能包含注释/字符串）；可通过拆分/去重复/抽 helper 减少复杂度，但不建议完全内联
-    # 证据：位置=runner/pipeline_verify.py:146；类型=function；引用≈2；规模≈35行
-    repo = Path(repo).resolve()
-    path = (repo / ".aider_fsm" / "hints_run.json").resolve()
-    if not path.exists():
-        return False, f"missing_hints_run_json: {path}"
-    data, err = _read_json(path)
-    if err:
-        return False, f"hints_run_json_{err}"
-    assert isinstance(data, dict)  # _read_json guarantees dict on success
-
-    if data.get("ok") is not True:
-        return False, "hints_run.ok_not_true"
-
-    chosen = data.get("chosen_command")
-    if not isinstance(chosen, str) or not chosen.strip():
-        return False, "hints_run.chosen_command_missing_or_empty"
-
-    executed = data.get("executed_attempts")
-    try:
-        executed_i = int(executed)
-    except Exception:
-        executed_i = 0
-    if executed_i <= 0:
-        return False, "hints_run.executed_attempts_not_positive"
-
-    score = data.get("score")
-    try:
-        score_f = float(score)
-    except Exception:
-        return False, "hints_run.score_invalid"
-    if score_f < 0.0 or score_f > 1.0:
-        return False, "hints_run.score_out_of_range"
-
-    return True, "ok"
-
-
 def _dump_kubectl(
     out_dir: Path,
     repo: Path,
@@ -717,7 +622,39 @@ def run_pipeline_verification(
                 )
             if _is_truthy(eval_env.get("AIDER_FSM_REQUIRE_HINTS")):
                 expected = _parse_json_str_list(eval_env.get("AIDER_FSM_HINT_ANCHORS_JSON"))
-                ok_hints, hint_reason = _validate_hints_used(repo, expected_anchors=expected)
+                repo2 = Path(repo).resolve()
+                path = (repo2 / ".aider_fsm" / "hints_used.json").resolve()
+                if not path.exists():
+                    ok_hints, hint_reason = False, f"missing_hints_used_json: {path}"
+                else:
+                    data, err = _read_json(path)
+                    if err:
+                        ok_hints, hint_reason = False, f"hints_used_json_{err}"
+                    else:
+                        assert isinstance(data, dict)  # _read_json guarantees dict on success
+                        if data.get("ok") is not True:
+                            ok_hints, hint_reason = False, "hints_used.ok_not_true"
+                        else:
+                            used = data.get("used_anchors")
+                            if not isinstance(used, list) or not used:
+                                ok_hints, hint_reason = False, "hints_used.used_anchors_missing_or_empty"
+                            else:
+                                used_clean = [str(x).strip() for x in used if isinstance(x, str) and str(x).strip()]
+                                if not used_clean:
+                                    ok_hints, hint_reason = False, "hints_used.used_anchors_invalid"
+                                else:
+                                    exp = [str(x).strip() for x in (expected or []) if str(x).strip()]
+                                    if exp and not any(u in exp for u in used_clean):
+                                        ok_hints, hint_reason = False, "hints_used.no_expected_anchor"
+                                    else:
+                                        commands = data.get("commands")
+                                        if commands is not None and (
+                                            not isinstance(commands, list)
+                                            or not any(isinstance(x, str) and x.strip() for x in commands)
+                                        ):
+                                            ok_hints, hint_reason = False, "hints_used.commands_invalid"
+                                        else:
+                                            ok_hints, hint_reason = True, "ok"
                 if not ok_hints:
                     try:
                         write_text(artifacts_dir / "hints_requirement_error.txt", hint_reason + "\n")
@@ -736,7 +673,41 @@ def run_pipeline_verification(
                         evaluation=eval_res,
                         metrics_errors=metrics_errors,
                     )
-                ok_run, run_reason = _validate_hints_run(repo)
+                repo2 = Path(repo).resolve()
+                path = (repo2 / ".aider_fsm" / "hints_run.json").resolve()
+                if not path.exists():
+                    ok_run, run_reason = False, f"missing_hints_run_json: {path}"
+                else:
+                    data, err = _read_json(path)
+                    if err:
+                        ok_run, run_reason = False, f"hints_run_json_{err}"
+                    else:
+                        assert isinstance(data, dict)  # _read_json guarantees dict on success
+                        if data.get("ok") is not True:
+                            ok_run, run_reason = False, "hints_run.ok_not_true"
+                        else:
+                            chosen = data.get("chosen_command")
+                            if not isinstance(chosen, str) or not chosen.strip():
+                                ok_run, run_reason = False, "hints_run.chosen_command_missing_or_empty"
+                            else:
+                                executed = data.get("executed_attempts")
+                                try:
+                                    executed_i = int(executed)
+                                except Exception:
+                                    executed_i = 0
+                                if executed_i <= 0:
+                                    ok_run, run_reason = False, "hints_run.executed_attempts_not_positive"
+                                else:
+                                    score = data.get("score")
+                                    try:
+                                        score_f = float(score)
+                                    except Exception:
+                                        ok_run, run_reason = False, "hints_run.score_invalid"
+                                    else:
+                                        if score_f < 0.0 or score_f > 1.0:
+                                            ok_run, run_reason = False, "hints_run.score_out_of_range"
+                                        else:
+                                            ok_run, run_reason = True, "ok"
                 if not ok_run:
                     try:
                         write_text(artifacts_dir / "hints_run_requirement_error.txt", run_reason + "\n")
@@ -802,7 +773,10 @@ def run_pipeline_verification(
                     metrics_errors=metrics_errors,
                 )
 
-            missing = _validate_metrics(eval_metrics or {}, pipeline.evaluation_required_keys)
+            missing: list[str] = []
+            for k in (pipeline.evaluation_required_keys or []):
+                if k not in (eval_metrics or {}):
+                    missing.append(k)
             if missing:
                 failed_stage = "metrics"
                 metrics_errors.append("evaluation.missing_keys: " + ", ".join(missing))
@@ -939,7 +913,10 @@ def run_pipeline_verification(
                         metrics_errors=metrics_errors,
                     )
 
-                missing = _validate_metrics(bench_metrics or {}, pipeline.benchmark_required_keys)
+                missing: list[str] = []
+                for k in (pipeline.benchmark_required_keys or []):
+                    if k not in (bench_metrics or {}):
+                        missing.append(k)
                 if missing:
                     failed_stage = "metrics"
                     metrics_errors.append("missing_keys: " + ", ".join(missing))

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -26,26 +26,11 @@ class BootstrapSpec:
     # 证据：位置=runner/bootstrap.py:23；类型=class；引用≈5；规模≈24行
 
     version: int = 1
-    cmds: list[str] = None  # type: ignore[assignment]
-    env: dict[str, str] = None  # type: ignore[assignment]
+    cmds: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
     workdir: str | None = None
     timeout_seconds: int | None = None
     retries: int = 0
-
-    def __post_init__(self) -> None:
-        """中文说明：
-        - 含义：dataclass 初始化后把 None 字段归一化为可用默认值。
-        - 内容：将 `cmds/env` 从 None 变为 `[]/{}`，避免调用点反复做空值处理。
-        - 可简略：可能（也可在类型定义处避免 None；但当前写法更直观）。
-        """
-        # 作用：中文说明：
-        # 能否简略：是
-        # 原因：规模≈10 行；引用次数≈0（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-        # 证据：位置=runner/bootstrap.py:37；类型=method；引用≈0；规模≈10行
-        if self.cmds is None:
-            object.__setattr__(self, "cmds", [])
-        if self.env is None:
-            object.__setattr__(self, "env", {})
 
 
 @dataclass(frozen=True)
@@ -58,87 +43,12 @@ class BootstrapLoadResult:
 
     spec: BootstrapSpec
     raw: str
-    warnings: list[str] = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        # 作用：内部符号：BootstrapLoadResult.__post_init__
-        # 能否简略：是
-        # 原因：规模≈3 行；引用次数≈0（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-        # 证据：位置=runner/bootstrap.py:52；类型=method；引用≈0；规模≈3行
-        if self.warnings is None:
-            object.__setattr__(self, "warnings", [])
+    warnings: list[str] = field(default_factory=list)
 
 
 _VAR_BRACE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _VAR_BARE_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 _DOLLAR_PLACEHOLDER = "\x00DOLLAR\x00"
-
-
-def _expand_env_value(raw: str, env: dict[str, str]) -> str:
-    """中文说明：
-    - 含义：对 bootstrap.yml 的 env 值做最小化的 shell 风格变量展开。
-    - 内容：支持 `${VAR}` 与 `$VAR`，并把 `$$` 转义成字面 `$`；不执行 shell，不做命令替换。
-    - 可简略：否（这是 bootstrap env 的关键特性；且实现刻意保持“安全且最小”）。
-    """
-    # 作用：中文说明：
-    # 能否简略：部分
-    # 原因：规模≈31 行；引用次数≈3（静态近似，可能包含注释/字符串）；可通过拆分/去重复/抽 helper 减少复杂度，但不建议完全内联
-    # 证据：位置=runner/bootstrap.py:67；类型=function；引用≈3；规模≈31行
-    # Minimal shell-style expansion for env values:
-    # - supports ${VAR} and $VAR
-    # - "$$" escapes to literal "$"
-    s = str(raw or "")
-    s = s.replace("$$", _DOLLAR_PLACEHOLDER)
-
-    def _brace(m: re.Match[str]) -> str:
-        """中文说明：
-        - 含义：`${VAR}` 形式的替换回调函数。
-        - 内容：从 `env` 取出变量值；不存在则返回空字符串。
-        - 可简略：是（可与 `_bare` 合并成一个回调；但拆开更直观）。
-        """
-        # 作用：中文说明：
-        # 能否简略：是
-        # 原因：规模≈7 行；引用次数≈3（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-        # 证据：位置=runner/bootstrap.py:79；类型=function；引用≈3；规模≈7行
-        return str(env.get(m.group(1)) or "")
-
-    def _bare(m: re.Match[str]) -> str:
-        """中文说明：
-        - 含义：`$VAR` 形式的替换回调函数。
-        - 内容：从 `env` 取出变量值；不存在则返回空字符串。
-        - 可简略：是（可与 `_brace` 合并；保留两个函数主要是可读性）。
-        """
-        # 作用：中文说明：
-        # 能否简略：是
-        # 原因：规模≈7 行；引用次数≈3（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-        # 证据：位置=runner/bootstrap.py:87；类型=function；引用≈3；规模≈7行
-        return str(env.get(m.group(1)) or "")
-
-    s = _VAR_BRACE_RE.sub(_brace, s)
-    s = _VAR_BARE_RE.sub(_bare, s)
-    return s.replace(_DOLLAR_PLACEHOLDER, "$")
-
-
-def _apply_env_mapping(base: dict[str, str], mapping: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
-    """中文说明：
-    - 含义：把 bootstrap.yml 的 env 映射应用到基底环境，并返回 (新环境, 实际应用的键值)。
-    - 内容：按顺序扩展变量（后面的值可引用前面刚写入的变量）；用于后续 stage 命令执行与结果记录。
-    - 可简略：否（和 `_expand_env_value` 配合构成 bootstrap env 语义）。
-    """
-    # 作用：中文说明：
-    # 能否简略：是
-    # 原因：规模≈16 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/bootstrap.py:100；类型=function；引用≈2；规模≈16行
-    env = dict(base)
-    applied: dict[str, str] = {}
-    for k, v in (mapping or {}).items():
-        key = str(k or "").strip()
-        if not key:
-            continue
-        value = _expand_env_value(str(v or ""), env)
-        env[key] = value
-        applied[key] = value
-    return env, applied
 
 
 def _normalize_bootstrap_applied_env_paths(repo: Path, applied_env: dict[str, str]) -> dict[str, str]:
@@ -200,58 +110,6 @@ def _normalize_bootstrap_applied_env_paths(repo: Path, applied_env: dict[str, st
     return out
 
 
-def _is_sensitive_key(key: str) -> bool:
-    """中文说明：
-    - 含义：粗略判断一个环境变量 key 是否可能包含敏感信息（用于日志脱敏）。
-    - 内容：按 key 名包含 KEY/TOKEN/SECRET/PASSWORD 等子串来判断。
-    - 可简略：可能（启发式判断；可按实际需要调整或迁移到统一的 secret 管理）。
-    """
-    # 作用：中文说明：
-    # 能否简略：是
-    # 原因：规模≈8 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/bootstrap.py:118；类型=function；引用≈2；规模≈8行
-    k = (key or "").upper()
-    return any(x in k for x in ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASS", "PWD"))
-
-
-def _redact_env(env: dict[str, str]) -> dict[str, str]:
-    """中文说明：
-    - 含义：将 env mapping 中可能敏感的值替换为 `***redacted***`。
-    - 内容：用于写入 bootstrap artifacts，避免把 token/key 直接落盘。
-    - 可简略：否（安全与合规需要；至少要保留脱敏机制）。
-    """
-    # 作用：中文说明：
-    # 能否简略：是
-    # 原因：规模≈13 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/bootstrap.py:128；类型=function；引用≈2；规模≈13行
-    out: dict[str, str] = {}
-    for k, v in (env or {}).items():
-        if _is_sensitive_key(k):
-            out[str(k)] = "***redacted***"
-        else:
-            out[str(k)] = "" if v is None else str(v)
-    return out
-
-
-def _as_optional_int(raw: Any, *, field: str, min_value: int | None = None) -> int | None:
-    # 作用：内部符号：_as_optional_int
-    # 能否简略：是
-    # 原因：规模≈13 行；引用次数≈3（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/bootstrap.py:138；类型=function；引用≈3；规模≈13行
-    if raw is None:
-        return None
-    s = str(raw).strip()
-    if not s:
-        return None
-    try:
-        n = int(s)
-    except Exception as e:
-        raise ValueError(f"bootstrap.{field} must be an integer") from e
-    if min_value is not None and n < int(min_value):
-        raise ValueError(f"bootstrap.{field} must be >= {int(min_value)}")
-    return n
-
-
 def _coerce_cmds(raw: Any, *, field_name: str, warnings: list[str]) -> list[str]:
     # 作用：内部符号：_coerce_cmds
     # 能否简略：否
@@ -307,29 +165,6 @@ def _coerce_cmds(raw: Any, *, field_name: str, warnings: list[str]) -> list[str]
     return out
 
 
-def _normalize_bootstrap_mapping(data: dict[str, Any], *, warnings: list[str]) -> dict[str, Any]:
-    # 作用：内部符号：_normalize_bootstrap_mapping
-    # 能否简略：是
-    # 原因：规模≈17 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/bootstrap.py:204；类型=function；引用≈2；规模≈17行
-    out = dict(data or {})
-    boot = out.get("boot")
-    if isinstance(boot, dict):
-        top_level_keys = {"cmds", "steps", "env", "workdir", "cwd", "timeout_seconds", "timeout", "retries", "retry"}
-        has_top_level_spec = any(k in out for k in top_level_keys)
-        if not has_top_level_spec:
-            merged = dict(boot)
-            for k, v in out.items():
-                if k == "boot":
-                    continue
-                merged[k] = v
-            out = merged
-            warnings.append("bootstrap.boot_mapping_unwrapped")
-        else:
-            warnings.append("bootstrap.boot_mapping_ignored_due_to_top_level_fields")
-    return out
-
-
 def load_bootstrap_spec_with_diagnostics(path: Path) -> BootstrapLoadResult:
     """Load bootstrap.yml and tolerate common scaffold formatting variants.
 
@@ -353,7 +188,21 @@ def load_bootstrap_spec_with_diagnostics(path: Path) -> BootstrapLoadResult:
         raise ValueError("bootstrap.yml must be a YAML mapping (dict) at the top level")
 
     warnings: list[str] = []
-    obj = _normalize_bootstrap_mapping(data, warnings=warnings)
+    obj = dict(data or {})
+    boot = obj.get("boot")
+    if isinstance(boot, dict):
+        top_level_keys = {"cmds", "steps", "env", "workdir", "cwd", "timeout_seconds", "timeout", "retries", "retry"}
+        has_top_level_spec = any(k in obj for k in top_level_keys)
+        if not has_top_level_spec:
+            merged = dict(boot)
+            for k, v in obj.items():
+                if k == "boot":
+                    continue
+                merged[k] = v
+            obj = merged
+            warnings.append("bootstrap.boot_mapping_unwrapped")
+        else:
+            warnings.append("bootstrap.boot_mapping_ignored_due_to_top_level_fields")
 
     version = int(obj.get("version") or 1)
     if version != 1:
@@ -389,13 +238,31 @@ def load_bootstrap_spec_with_diagnostics(path: Path) -> BootstrapLoadResult:
     if timeout_raw is None and obj.get("timeout") is not None:
         timeout_raw = obj.get("timeout")
         warnings.append("bootstrap.timeout_alias_used")
-    timeout_seconds = _as_optional_int(timeout_raw, field="timeout_seconds", min_value=1)
+    timeout_seconds = None
+    if timeout_raw is not None:
+        s = str(timeout_raw).strip()
+        if s:
+            try:
+                timeout_seconds = int(s)
+            except Exception as e:
+                raise ValueError("bootstrap.timeout_seconds must be an integer") from e
+            if timeout_seconds < 1:
+                raise ValueError("bootstrap.timeout_seconds must be >= 1")
 
     retries_raw = obj.get("retries")
     if retries_raw is None and obj.get("retry") is not None:
         retries_raw = obj.get("retry")
         warnings.append("bootstrap.retry_alias_used")
-    retries = _as_optional_int(retries_raw, field="retries", min_value=0)
+    retries = None
+    if retries_raw is not None:
+        s = str(retries_raw).strip()
+        if s:
+            try:
+                retries = int(s)
+            except Exception as e:
+                raise ValueError("bootstrap.retries must be an integer") from e
+            if retries < 0:
+                raise ValueError("bootstrap.retries must be >= 0")
     if retries is None:
         retries = 0
 
@@ -465,14 +332,34 @@ def run_bootstrap(
     env_base = dict(os.environ)
     env_base["AIDER_FSM_REPO_ROOT"] = str(repo.resolve())
 
-    env_for_cmds, applied_env = _apply_env_mapping(env_base, spec.env)
+    env_for_cmds = dict(env_base)
+    applied_env: dict[str, str] = {}
+    for k, v in (spec.env or {}).items():
+        key = str(k or "").strip()
+        if not key:
+            continue
+        s = str(v or "")
+        s = s.replace("$$", _DOLLAR_PLACEHOLDER)
+        s = _VAR_BRACE_RE.sub(lambda m: str(env_for_cmds.get(m.group(1)) or ""), s)
+        s = _VAR_BARE_RE.sub(lambda m: str(env_for_cmds.get(m.group(1)) or ""), s)
+        value = s.replace(_DOLLAR_PLACEHOLDER, "$")
+        env_for_cmds[key] = value
+        applied_env[key] = value
+
     applied_env = _normalize_bootstrap_applied_env_paths(repo, applied_env)
     env_for_cmds.update(dict(applied_env))
     env_for_cmds = safe_env(env_for_cmds, {}, unattended=unattended)
     env_for_cmds["AIDER_FSM_STAGE"] = "bootstrap"
     env_for_cmds["AIDER_FSM_ARTIFACTS_DIR"] = str(artifacts_dir.resolve())
     env_for_cmds["AIDER_FSM_REPO_ROOT"] = str(repo.resolve())
-    write_json(artifacts_dir / "bootstrap_env.json", _redact_env(applied_env))
+    redacted: dict[str, str] = {}
+    for k, v in (applied_env or {}).items():
+        ku = str(k or "").upper()
+        if any(x in ku for x in ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASS", "PWD")):
+            redacted[str(k)] = "***redacted***"
+        else:
+            redacted[str(k)] = "" if v is None else str(v)
+    write_json(artifacts_dir / "bootstrap_env.json", redacted)
 
     try:
         workdir = resolve_workdir(repo, spec.workdir)

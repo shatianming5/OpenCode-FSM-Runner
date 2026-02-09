@@ -1,27 +1,35 @@
 from __future__ import annotations
 
-import json
 import os
 import sys
-import time
-from pathlib import Path
 
 # Support running either as a module (`python -m runner.generic_evaluation`) or as a
 # script (`python $AIDER_FSM_RUNNER_ROOT/runner/generic_evaluation.py`). The latter
 # avoids module-name collisions with target repos that may contain their own `runner/`
 # package.
 if __package__ in (None, ""):
-    _ROOT = Path(__file__).resolve().parents[1]
-    # Ensure runner root is first on sys.path to avoid collisions like having
-    # `$AIDER_FSM_RUNNER_ROOT/runner` earlier (which would import runner/runner.py
-    # as a top-level module and break relative imports).
+    _file = os.path.abspath(__file__)
+    _SCRIPT_DIR = os.path.dirname(_file)
+    _ROOT = os.path.dirname(_SCRIPT_DIR)
+    # When executed as a script, Python prepends the script directory (runner/)
+    # to sys.path. That can shadow stdlib modules like `types` via runner/types.py.
+    # Fix by removing runner/ from sys.path and adding the repo root instead.
     root_s = str(_ROOT)
+    script_s = str(_SCRIPT_DIR)
     try:
+        while script_s in sys.path:
+            sys.path.remove(script_s)
         while root_s in sys.path:
             sys.path.remove(root_s)
     except Exception:
         pass
     sys.path.insert(0, root_s)
+
+import json
+import time
+from pathlib import Path
+
+if __package__ in (None, ""):
     from runner.hints_exec import run_hints  # type: ignore
     from runner._util import _is_truthy, _read_json_object  # type: ignore
 else:

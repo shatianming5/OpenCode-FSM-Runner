@@ -22,36 +22,6 @@ def _read_text_tail(path: Path, *, n: int) -> str:
         return ""
 
 
-def _build_contract_validation_snapshot(repo: Path) -> str:
-    """Best-effort snapshot of current scaffold contract validity for repair prompts."""
-    # 作用：Best-effort snapshot of current scaffold contract validity for repair prompts.
-    # 能否简略：部分
-    # 原因：规模≈24 行；引用次数≈2（静态近似，可能包含注释/字符串）；可通过拆分/去重复/抽 helper 减少复杂度，但不建议完全内联
-    # 证据：位置=runner/contract_repair.py:23；类型=function；引用≈2；规模≈24行
-    repo = Path(repo).resolve()
-    pipeline_path = (repo / "pipeline.yml").resolve()
-    if not pipeline_path.exists():
-        return "pipeline.yml_missing"
-    try:
-        pipeline = load_pipeline_spec(pipeline_path)
-    except Exception as e:
-        return f"pipeline_parse_error: {e}"
-    try:
-        report = validate_scaffold_contract(repo, pipeline=pipeline, require_metrics=True)
-    except Exception as e:
-        return f"contract_validation_failed: {e}"
-    payload = {
-        "ok": bool(report.ok),
-        "errors": list(report.errors),
-        "warnings": list(report.warnings or []),
-    }
-    try:
-        text = json.dumps(payload, ensure_ascii=False, indent=2)
-    except Exception:
-        text = str(payload)
-    return tail(text, 8000)
-
-
 def _bootstrap_artifacts_tail(deploy_artifacts_dir: Path) -> str:
     """Best-effort: extract the most relevant bootstrap failure details from artifacts.
 
@@ -171,7 +141,31 @@ def repair_contract(
         bootstrap_artifacts = _bootstrap_artifacts_tail(deploy_artifacts_dir)
         rollout_err = _read_text_tail(rollout_eval_artifacts_dir / "rollout_stderr.txt", n=4000)
         eval_err = _read_text_tail(rollout_eval_artifacts_dir / "evaluation_stderr.txt", n=4000)
-        contract_validation = _build_contract_validation_snapshot(repo)
+        repo2 = Path(repo).resolve()
+        pipeline_path = (repo2 / "pipeline.yml").resolve()
+        if not pipeline_path.exists():
+            contract_validation = "pipeline.yml_missing"
+        else:
+            try:
+                pipeline = load_pipeline_spec(pipeline_path)
+            except Exception as e:
+                contract_validation = f"pipeline_parse_error: {e}"
+            else:
+                try:
+                    report = validate_scaffold_contract(repo2, pipeline=pipeline, require_metrics=True)
+                except Exception as e:
+                    contract_validation = f"contract_validation_failed: {e}"
+                else:
+                    payload = {
+                        "ok": bool(not report.errors),
+                        "errors": list(report.errors),
+                        "warnings": list(report.warnings or []),
+                    }
+                    try:
+                        text = json.dumps(payload, ensure_ascii=False, indent=2)
+                    except Exception:
+                        text = str(payload)
+                    contract_validation = tail(text, 8000)
         # When evaluation uses `runner.generic_evaluation`, the real failure reason is typically
         # recorded in `.aider_fsm/hints_run.json` rather than evaluation_stderr.txt.
         hints_run_preview = _read_text_tail(repo / ".aider_fsm" / "hints_run.json", n=6000)

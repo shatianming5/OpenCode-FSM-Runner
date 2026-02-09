@@ -1,10 +1,26 @@
 from __future__ import annotations
 
-import json
 import os
+import sys
+
+if __package__ in (None, ""):
+    _file = os.path.abspath(__file__)
+    _SCRIPT_DIR = os.path.dirname(_file)
+    _ROOT = os.path.dirname(_SCRIPT_DIR)
+    root_s = str(_ROOT)
+    script_s = str(_SCRIPT_DIR)
+    try:
+        while script_s in sys.path:
+            sys.path.remove(script_s)
+        while root_s in sys.path:
+            sys.path.remove(root_s)
+    except Exception:
+        pass
+    sys.path.insert(0, root_s)
+
+import json
 import random
 import re
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -13,14 +29,6 @@ from pathlib import Path
 from typing import Any
 
 if __package__ in (None, ""):
-    _ROOT = Path(__file__).resolve().parents[1]
-    root_s = str(_ROOT)
-    try:
-        while root_s in sys.path:
-            sys.path.remove(root_s)
-    except Exception:
-        pass
-    sys.path.insert(0, root_s)
     from runner._util import (  # type: ignore
         _ensure_openai_v1_base,
         _find_hf_test_parquet,
@@ -37,31 +45,6 @@ def _now_iso() -> str:
     # 原因：规模≈2 行；引用次数≈3（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
     # 证据：位置=runner/generic_rollout.py:16；类型=function；引用≈3；规模≈2行
     return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime())
-
-
-def _read_text(path: Path, *, max_chars: int) -> str:
-    # 作用：内部符号：_read_text
-    # 能否简略：是
-    # 原因：规模≈8 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/generic_rollout.py:20；类型=function；引用≈2；规模≈8行
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return ""
-    if len(text) > max_chars:
-        return text[:max_chars]
-    return text
-
-
-def _read_hf_manifest(repo_root: Path) -> dict[str, Any] | None:
-    # 作用：内部符号：_read_hf_manifest
-    # 能否简略：是
-    # 原因：规模≈5 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/generic_rollout.py:59；类型=function；引用≈2；规模≈5行
-    p = (repo_root / "data" / "hf_manifest.json").resolve()
-    if not p.exists():
-        return None
-    return _read_json_object(p)
 
 
 def _resolve_openai_base(repo_root: Path) -> str:
@@ -222,26 +205,6 @@ def _extract_last_number(text: str) -> str:
     return str(nums[-1] or "").strip()
 
 
-def _answers_match(pred_text: str, gold_text: str) -> bool:
-    # 作用：内部符号：_answers_match
-    # 能否简略：是
-    # 原因：规模≈14 行；引用次数≈2（静态近似，可能包含注释/字符串）；逻辑短且低复用，适合 inline/合并以减少符号面
-    # 证据：位置=runner/generic_rollout.py:216；类型=function；引用≈2；规模≈14行
-    pred = _extract_final_line(pred_text)
-    gold = _extract_final_line(gold_text)
-
-    pred_num = _extract_last_number(pred)
-    gold_num = _extract_last_number(gold)
-    if pred_num and gold_num:
-        fp = _to_fraction(pred_num)
-        fg = _to_fraction(gold_num)
-        if fp is not None and fg is not None:
-            return fp == fg
-        return _norm_number_str(pred_num) == _norm_number_str(gold_num)
-
-    return _norm_answer_str(pred) == _norm_answer_str(gold)
-
-
 def _maybe_rollout_hf_qa_parquet(
     repo_root: Path,
     *,
@@ -263,7 +226,8 @@ def _maybe_rollout_hf_qa_parquet(
     # 能否简略：否
     # 原因：规模≈102 行；引用次数≈2（静态近似，可能包含注释/字符串）；多点复用或涉及副作用/协议验收，过度简化会增加回归风险或降低可审计性
     # 证据：位置=runner/generic_rollout.py:248；类型=function；引用≈2；规模≈102行
-    if _read_hf_manifest(repo_root) is None:
+    manifest_path = (repo_root / "data" / "hf_manifest.json").resolve()
+    if not manifest_path.exists() or _read_json_object(manifest_path) is None:
         return False, {}
 
     parquet_path = _find_hf_test_parquet(repo_root)
@@ -327,7 +291,20 @@ def _maybe_rollout_hf_qa_parquet(
                 errors.append(str(e))
                 completion = ""
 
-            is_ok = _answers_match(completion, a)
+            pred = _extract_final_line(completion)
+            gold = _extract_final_line(a)
+
+            pred_num = _extract_last_number(pred)
+            gold_num = _extract_last_number(gold)
+            if pred_num and gold_num:
+                fp = _to_fraction(pred_num)
+                fg = _to_fraction(gold_num)
+                if fp is not None and fg is not None:
+                    is_ok = fp == fg
+                else:
+                    is_ok = _norm_number_str(pred_num) == _norm_number_str(gold_num)
+            else:
+                is_ok = _norm_answer_str(pred) == _norm_answer_str(gold)
 
             reward = 1.0 if is_ok else 0.0
             correct += int(is_ok)
@@ -366,7 +343,12 @@ def _build_prompts(repo_root: Path, *, n: int) -> list[str]:
     for cand in ("README.md", "readme.md", "README.txt"):
         p = (repo_root / cand).resolve()
         if p.exists():
-            readme = _read_text(p, max_chars=6000)
+            try:
+                readme = p.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                readme = ""
+            if len(readme) > 6000:
+                readme = readme[:6000]
             break
     if readme:
         chunks = [c.strip() for c in readme.split("\n\n") if c.strip()]
