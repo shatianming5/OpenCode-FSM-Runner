@@ -50,27 +50,27 @@ Notes:
 
 ```mermaid
 flowchart TD
-    A[runner_env.setup(target)] --> B[open_env: resolve target repo<br/>path/git/HF dataset]
-    B --> C{pipeline.yml exists?}
-    C -- No --> D[OpenCode scaffold_contract<br/>writes pipeline.yml + .aider_fsm/**]
-    D --> E[validate_scaffold_contract]
-    C -- Yes --> F[EnvSession returned]
+    A["runner_env.setup(target)"] --> B["open_env: resolve target repo<br/>path/git/HF dataset"]
+    B --> C{"pipeline.yml exists?"}
+    C -- No --> D["OpenCode scaffold_contract<br/>writes pipeline.yml + .aider_fsm/"]
+    D --> E["validate_scaffold_contract"]
+    C -- Yes --> F["EnvSession returned"]
     E --> F
 
-    F --> G[sess.rollout(llm, ...)]
-    G --> H[deploy stage<br/>pipeline_verify.run_pipeline_verification]
-    H --> I{deploy ok?}
-    I -- No --> J[repair_contract via OpenCode<br/>(.aider_fsm/** only)] --> H
-    I -- Yes --> K[rollout stage<br/>writes .aider_fsm/rollout.json]
-    K --> L{rollout ok?}
+    F --> G["sess.rollout(llm, ...)"]
+    G --> H["deploy stage<br/>pipeline_verify.run_pipeline_verification"]
+    H --> I{"deploy ok?"}
+    I -- No --> J["repair_contract via OpenCode<br/>(.aider_fsm/ only)"] --> H
+    I -- Yes --> K["rollout stage<br/>writes .aider_fsm/rollout.json"]
+    K --> L{"rollout ok?"}
     L -- No --> J
-    L -- Yes --> M[sess.evaluate(...)]
+    L -- Yes --> M["sess.evaluate(...)"]
 
-    M --> N[evaluation stage<br/>writes .aider_fsm/metrics.json]
-    N --> O{metrics + audits ok?}
+    M --> N["evaluation stage<br/>writes .aider_fsm/metrics.json"]
+    N --> O{"metrics + audits ok?"}
     O -- No --> J
-    O -- Yes --> P[best-effort deploy_teardown]
-    P --> Q[return EvaluationCallResult]
+    O -- Yes --> P["best-effort deploy_teardown"]
+    P --> Q["return EvaluationCallResult"]
 ```
 
 ## OpenCode server (optional)
